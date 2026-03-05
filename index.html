@@ -470,7 +470,11 @@ const TH={anchor:{minConf:85,minEdge:18,max:1},core:{minConf:75,minEdge:10,max:2
 function buildCard(analyzed,br){
   const units=calcUnits(br);
   const elig=analyzed
-    .filter(a=>a.hML&&a.hSp&&!a.isLF&&!a.pubPen&&a.he.rank<108&&a.ae.rank<108&&Math.abs(parseFloat(a.hSp))<=10)
+    .filter(a=>a.hML&&a.hSp&&!a.isLF&&!a.pubPen&&a.he.rank<108&&a.ae.rank<108&&(
+      // Anchors bypass the spread cap — if confidence+edge are elite, the wide spread is already priced in
+      (a.conf>=TH.anchor.minConf&&a.es>=TH.anchor.minEdge) ||
+      Math.abs(parseFloat(a.hSp))<=10
+    ))
     .sort((a,b)=>b.conf-a.conf);
   const picks=[];let exp=0,ac=0,cc=0,oc=0;
   for(const g of elig){
