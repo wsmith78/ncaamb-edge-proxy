@@ -1,0 +1,14 @@
+{
+  "name": "ncaamb-edge-proxy",
+  "version": "1.0.0",
+  "description": "CORS proxy for NCAAMB Edge betting engine — routes Odds API calls from iPhone",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {}
+}
