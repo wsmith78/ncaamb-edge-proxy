@@ -369,11 +369,45 @@ function getEff(n){
   if(!n)return{rank:110,adjEM:0,adjO:100,adjD:100,pace:67,defReb:70,toRate:16,efg:50,name:"Unknown"};
   if(TE[n])return{...TE[n],name:n};
   const lo=n.toLowerCase();
+  // 1. Exact case-insensitive match
   let k=Object.keys(TE).find(k2=>k2.toLowerCase()===lo);
+  // 2. Strip mascot, try exact match on school name
   if(!k){const nm=lo.replace(MASCOTS,"").trim();const cap=nm.split(" ").map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(" ");if(TE[cap])k=cap;}
-  if(!k){const nm2=lo.replace(MASCOTS,"").trim();k=Object.keys(TE).find(k2=>k2.length>=6&&nm2.includes(k2.toLowerCase()));}
-  if(!k)k=Object.keys(TE).find(k2=>k2.length>=6&&lo.includes(k2.toLowerCase()));
-  if(!k){const first=lo.split(" ")[0];if(first.length>=7)k=Object.keys(TE).find(k2=>k2.toLowerCase().startsWith(first));}
+  // 3. Stripped name contains DB key — but require FULL word boundary match to prevent
+  //    "Florida A&M" matching "Florida", "Arkansas State" matching "Arkansas", etc.
+  if(!k){
+    const nm2=lo.replace(MASCOTS,"").trim();
+    k=Object.keys(TE).find(k2=>{
+      if(k2.length<6)return false;
+      const kl=k2.toLowerCase();
+      const idx=nm2.indexOf(kl);
+      if(idx===-1)return false;
+      // Must be at start or preceded by space, AND followed by end or space
+      const before=idx===0||nm2[idx-1]===" ";
+      const after=idx+kl.length===nm2.length||nm2[idx+kl.length]===" ";
+      return before&&after;
+    });
+  }
+  // 4. Input name contains DB key with word boundaries
+  if(!k){
+    k=Object.keys(TE).find(k2=>{
+      if(k2.length<6)return false;
+      const kl=k2.toLowerCase();
+      const idx=lo.indexOf(kl);
+      if(idx===-1)return false;
+      const before=idx===0||lo[idx-1]===" ";
+      const after=idx+kl.length===lo.length||lo[idx+kl.length]===" ";
+      return before&&after;
+    });
+  }
+  // 5. First word match — only if input has exactly one word or first word is long and unique
+  if(!k){
+    const words=lo.split(" ");
+    const first=words[0];
+    // Skip if input has multiple words that look like "Florida A&M" — first word alone is ambiguous
+    if(first.length>=7&&words.length===1)
+      k=Object.keys(TE).find(k2=>k2.toLowerCase().startsWith(first));
+  }
   return k?{...TE[k],name:k}:{rank:110,adjEM:0,adjO:100,adjD:100,pace:67,defReb:70,toRate:16,efg:50,name:n};
 }
 
