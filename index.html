@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="NCAAMB Edge"/>
+<meta name="theme-color" content="#07090f"/>
+<title>NCAAMB Edge</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#07090f;color:#dce8f8;font-family:'JetBrains Mono','Fira Code','Courier New',monospace;overflow-x:hidden}
+  ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:#07090f}::-webkit-scrollbar-thumb{background:#18243a;border-radius:3px}
+  input::placeholder{color:#4a5a7a}input:focus{outline:none;border-color:#00e5ff!important}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useCallback,useRef}=React;
+
+// ── CONFIG ────────────────────────────────────────────────────────────────────
+const SPORT="basketball_ncaab",REGIONS="us",MARKETS="h2h,spreads",BOOKMAKERS="draftkings,fanduel,betmgm,caesars";
+const STORAGE_KEYS={model:"ncaamb_ml_v4",bets:"ncaamb_bets_v4",bankroll:"ncaamb_br_v4",results:"ncaamb_res_v4",proxy:"ncaamb_proxy_v4"};
+const T={bg:"#07090f",surface:"#0c1018",card:"#10161f",border:"#18243a",accent:"#00e5ff",green:"#00e676",red:"#ff3d57",gold:"#ffd600",purple:"#b388ff",orange:"#ff9100",text:"#dce8f8",muted:"#4a5a7a"};
+
+function sg(k,fb){try{const v=localStorage.getItem(k);return v?JSON.parse(v):fb}catch{return fb}}
+function ss(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}}
+
+// ── ML MODEL ──────────────────────────────────────────────────────────────────
+const DW={adjEM_diff:0.38,homeCourt:3.2,paceFactor:0.12,publicBias:-0.18,recentForm:0.22,guardAdvantage:0.15,defRebound:0.11,midMajorBonus:0.08,underdog_short:0.14,confTourney:0.09,learningRate:0.02,totalPredictions:0,correctPredictions:0,totalBets:0,winningBets:0,calibrationError:0};
+class MLModel{
+  constructor(w){this.weights=w||{...DW}}
+  sigmoid(x){return 1/(1+Math.exp(-x))}
+  buildFeatures(he,ae,spread,isHome,isMM){
+    const emD=he.adjEM-ae.adjEM,pdD=he.pace-ae.pace,drD=he.defReb-ae.defReb,sv=parseFloat(spread)||0;
+    return{adjEM_diff:emD,homeCourt:isHome?1:0,paceFactor:pdD,publicBias:Math.abs(emD)>20?-1:0,recentForm:0,guardAdvantage:0.5,defRebound:drD,midMajorBonus:isMM?1:0,underdog_short:(!isHome&&sv>0&&sv<=4)?1:0,confTourney:0.5,slowTempo:Math.min(he.pace,ae.pace)<66?1:0,spreadVal:sv};
+  }
+  predict(f){
+    const w=this.weights;
+    const s=f.adjEM_diff*w.adjEM_diff+f.homeCourt*w.homeCourt+f.paceFactor*w.paceFactor+f.publicBias*w.publicBias+f.recentForm*w.recentForm+f.guardAdvantage*w.guardAdvantage+f.defRebound*w.defRebound+f.midMajorBonus*w.midMajorBonus+f.underdog_short*w.underdog_short+f.confTourney*w.confTourney;
+    return this.sigmoid(s/8);
+  }
+  learn(f,p,a){
+    const lr=this.weights.learningRate,err=a-p,grad=p*(1-p)*err;
+    Object.keys(f).forEach(k=>{if(this.weights[k]!==undefined){this.weights[k]+=lr*grad*f[k];this.weights[k]=Math.max(-5,Math.min(5,this.weights[k]))}});
+    this.weights.totalPredictions++;
+    if(Math.round(p)===a)this.weights.correctPredictions++;
+    this.weights.calibrationError=Math.abs(p-a)*0.1+(this.weights.calibrationError||0)*0.9;
+    return this.weights;
+  }
+  get accuracy(){const t=this.weights.totalPredictions;return t>0?((this.weights.correctPredictions/t)*100).toFixed(1):"—"}
+  get winRate(){const t=this.weights.totalBets;return t>0?((this.weights.winningBets/t)*100).toFixed(1):"—"}
+  save(){ss(STORAGE_KEYS.model,this.weights)}
+}
+
+// ── TEAM DATA ─────────────────────────────────────────────────────────────────
+const TE={
+  "Houston":{rank:3,adjEM:27.6,adjO:116.8,adjD:89.2,pace:65.4,defReb:76.2},
+  "Marquette":{rank:8,adjEM:27.4,adjO:121.2,adjD:93.8,pace:70.1,defReb:73.8},
+  "Purdue":{rank:6,adjEM:27.7,adjO:120.1,adjD:92.4,pace:67.9,defReb:75.1},
+  "Creighton":{rank:12,adjEM:24.3,adjO:118.4,adjD:94.1,pace:68.2,defReb:74.2},
+  "Duke":{rank:4,adjEM:28.1,adjO:122.4,adjD:94.3,pace:72.1,defReb:72.1},
+  "Auburn":{rank:2,adjEM:29.2,adjO:119.8,adjD:90.6,pace:69.4,defReb:74.8},
+  "Tennessee":{rank:5,adjEM:27.9,adjO:116.2,adjD:88.3,pace:64.8,defReb:78.4},
+  "Florida":{rank:7,adjEM:26.8,adjO:118.1,adjD:91.3,pace:68.8,defReb:73.2},
+  "St. John":{rank:9,adjEM:25.4,adjO:117.2,adjD:91.8,pace:67.2,defReb:72.8},
+  "Iowa State":{rank:10,adjEM:24.9,adjO:115.8,adjD:90.9,pace:66.4,defReb:74.1},
+  "Wisconsin":{rank:38,adjEM:13.3,adjO:110.4,adjD:97.1,pace:63.2,defReb:77.8},
+  "Indiana":{rank:45,adjEM:10.8,adjO:109.2,adjD:98.4,pace:67.4,defReb:71.2},
+  "Texas":{rank:22,adjEM:17.4,adjO:114.2,adjD:96.8,pace:68.8,defReb:73.4},
+  "Arkansas":{rank:29,adjEM:15.6,adjO:112.8,adjD:97.2,pace:71.2,defReb:72.1},
+  "Baylor":{rank:17,adjEM:20.2,adjO:115.4,adjD:95.2,pace:69.8,defReb:73.8},
+  "Notre Dame":{rank:41,adjEM:11.7,adjO:109.8,adjD:98.1,pace:66.4,defReb:71.8},
+  "Stanford":{rank:55,adjEM:8.2,adjO:107.4,adjD:99.2,pace:65.8,defReb:70.4},
+  "Villanova":{rank:33,adjEM:14.1,adjO:111.2,adjD:97.1,pace:64.8,defReb:74.4},
+  "Northwestern":{rank:72,adjEM:5.4,adjO:104.8,adjD:99.4,pace:66.1,defReb:70.8},
+  "Maryland":{rank:68,adjEM:6.2,adjO:105.4,adjD:99.2,pace:67.8,defReb:71.2},
+  "New Mexico":{rank:25,adjEM:18.4,adjO:114.8,adjD:96.4,pace:70.2,defReb:72.8},
+  "Colorado State":{rank:48,adjEM:9.8,adjO:108.4,adjD:98.6,pace:68.4,defReb:71.4},
+  "Saint Louis":{rank:18,adjEM:19.8,adjO:113.4,adjD:93.6,pace:66.8,defReb:75.4},
+  "Pittsburgh":{rank:48,adjEM:10.1,adjO:108.9,adjD:98.8,pace:67.1,defReb:70.8},
+  "DePaul":{rank:88,adjEM:2.1,adjO:102.4,adjD:100.3,pace:68.4,defReb:68.4},
+};
+function getEff(n){const nm=n||"";const k=Object.keys(TE).find(k=>nm.toLowerCase().includes(k.toLowerCase())||k.toLowerCase().includes(nm.toLowerCase().split(" ")[0]));return k?{...TE[k],name:k}:{rank:120,adjEM:0,adjO:100,adjD:100,pace:67,defReb:70,name:nm}}
+
+// ── ANALYSIS ──────────────────────────────────────────────────────────────────
+function calcUnits(br){const u=br*0.02;return{unit:+u.toFixed(2),anchor:+(u*2.5).toFixed(2),core:+(u*1.5).toFixed(2),optional:+u.toFixed(2),maxDaily:+(br*0.12).toFixed(2)}}
+function getTier(i,es){return i===0&&es>18?"anchor":i<=2&&es>10?"core":"optional"}
+
+function analyzeGame(g,ml,br){
+  const home=g.home_team,away=g.away_team,he=getEff(home),ae=getEff(away);
+  let hML=null,aML=null,hSp=null,hSpO=null,aSp=null,aSpO=null;
+  const spHist=[];let openSp=null;
+  (g.bookmakers||[]).forEach((bm,bi)=>{
+    (bm.markets||[]).forEach(mkt=>{
+      if(mkt.key==="h2h")mkt.outcomes.forEach(o=>{if(o.name===home&&(!hML||o.price>hML))hML=o.price;if(o.name===away&&(!aML||o.price>aML))aML=o.price;});
+      if(mkt.key==="spreads")mkt.outcomes.forEach(o=>{
+        if(o.name===home){spHist.push({bm:bm.key,point:o.point});if(bi===0)openSp=o.point;if(!hSp||o.price>(hSpO||-9999)){hSp=o.point;hSpO=o.price;}}
+        if(o.name===away&&!aSp){aSp=o.point;aSpO=o.price;}
+      });
+    });
+  });
+  const lm=(openSp!==null&&hSp!==null)?+(hSp-openSp).toFixed(1):null;
+  const mlP=ml=>ml?(ml<0?(-ml)/(-ml+100):100/(ml+100)):0.5;
+  const rhP=mlP(hML),raP=mlP(aML),norm=rhP+raP,mktHP=rhP/norm;
+  const isMM=he.rank>50&&ae.rank>50,isLF=hSp&&hSp<-10,isSU=aSp&&aSp>0&&aSp<=4,slow=Math.min(he.pace,ae.pace)<66;
+  const emD=he.adjEM-ae.adjEM+3.2,pubPen=Math.abs(emD)>20;
+  const feats=ml.buildFeatures(he,ae,hSp,true,isMM),modHP=ml.predict(feats);
+  const edge=modHP-mktHP,absE=Math.abs(edge),valSide=edge>0?home:away,isVal=absE>0.04&&!pubPen;
+  const es=Math.min(30,+(Math.abs(he.adjEM-ae.adjEM)+absE*20).toFixed(1));
+  const cl={efficiencyMismatch:Math.abs(he.adjEM-ae.adjEM)>8,noPublicBias:!pubPen,shortUnderdog:isSU,slowTempo:slow,defReboundEdge:Math.abs(he.defReb-ae.defReb)>3,midMajorEdge:isMM,valueDetected:isVal,noLargeFavorite:!isLF};
+  const cs=Object.values(cl).filter(Boolean).length;
+  const conf=Math.min(96,Math.round(50+es*1.2+absE*25+cs*2));
+  return{id:g.id||home+away,home,away,he,ae,hML,aML,hSp,hSpO,aSp,aSpO,mktHP:(mktHP*100).toFixed(1),modHP:(modHP*100).toFixed(1),edge:edge.toFixed(3),es,isVal,valSide,conf,lm,isMM,isLF,isSU,slow,pubPen,cl,cs,feats,commenceTime:g.commence_time,units:calcUnits(br)};
+}
+function buildCard(analyzed,br){
+  const units=calcUnits(br);
+  const elig=analyzed.filter(a=>a.hML&&a.hSp&&!a.isLF&&!a.pubPen).sort((a,b)=>b.conf-a.conf);
+  const picks=[];let exp=0;
+  elig.forEach((g,i)=>{
+    if(picks.length>=4||exp>=units.maxDaily)return;
+    const tier=getTier(picks.length,g.es);
+    const wager=picks.length===0?units.anchor:picks.length<=2?units.core:units.optional;
+    if(exp+wager>units.maxDaily)return;
+    picks.push({...g,tier,wager,rank:picks.length+1});exp+=wager;
+  });
+  const traps=analyzed.filter(a=>a.pubPen||a.isLF||(a.cs<2&&a.mktHP>75)).slice(0,3);
+  return{picks,traps,exp:exp.toFixed(2),units};
+}
+
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+const TIER={anchor:{icon:"⭐",label:"ANCHOR BET",color:T.gold},core:{icon:"💰",label:"CORE BET",color:T.green},optional:{icon:"🎯",label:"VALUE BET",color:T.purple}};
+const s={pill:c=>({background:`${c}18`,border:`1px solid ${c}44`,color:c,fontSize:"9px",fontWeight:"700",padding:"2px 8px",borderRadius:"2px",letterSpacing:"1.5px",display:"inline-block"}),input:{background:T.surface,border:`1px solid ${T.border}`,color:T.text,padding:"9px 12px",borderRadius:"4px",fontFamily:"inherit",fontSize:"12px",width:"100%",boxSizing:"border-box"},btn:(c,tc="#000")=>({background:c,color:tc,border:"none",padding:"9px 18px",borderRadius:"4px",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",fontWeight:"700",letterSpacing:"1px"})};
+const fml=n=>n?(n>0?`+${n}`:`${n}`):"—";
+const ft=iso=>{try{return new Date(iso).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}catch{return"—"}};
+
+// ── PICK CARD ─────────────────────────────────────────────────────────────────
+function PickCard({pick,showDetail}){
+  const[open,setOpen]=useState(showDetail||false);
+  const tc=TIER[pick.tier]||TIER.optional;
+  const recSide=parseFloat(pick.edge)>0?pick.home:pick.away;
+  const recSp=parseFloat(pick.edge)>0?pick.hSp:pick.aSp;
+  const recSpO=parseFloat(pick.edge)>0?pick.hSpO:pick.aSpO;
+  return(
+    <div onClick={()=>setOpen(o=>!o)} style={{background:T.card,border:`1px solid ${tc.color}55`,borderLeft:`4px solid ${tc.color}`,borderRadius:"6px",padding:"16px",cursor:"pointer",marginBottom:"12px",boxShadow:`0 4px 20px ${tc.color}08`}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px",flexWrap:"wrap",gap:"6px"}}>
+        <div style={{display:"flex",gap:"6px",flexWrap:"wrap"}}>
+          <span style={s.pill(tc.color)}>{tc.icon} {tc.label}</span>
+          <span style={s.pill(T.accent)}>{pick.conf}% CONF</span>
+          {pick.isMM&&<span style={s.pill(T.orange)}>MID-MAJOR</span>}
+          {pick.isSU&&<span style={s.pill(T.purple)}>SHORT DOG</span>}
+          {pick.slow&&<span style={s.pill(T.muted+"ff")}>SLOW TEMPO</span>}
+        </div>
+        <span style={{fontSize:"10px",color:T.muted}}>{ft(pick.commenceTime)}</span>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 24px 1fr",gap:"4px",alignItems:"center",marginBottom:"12px"}}>
+        <div>
+          <div style={{fontSize:"13px",fontWeight:"700",color:T.text}}>{pick.away}</div>
+          <div style={{fontSize:"10px",color:T.muted}}>#{pick.ae.rank} · {(100-parseFloat(pick.mktHP)).toFixed(1)}% mkt</div>
+        </div>
+        <div style={{textAlign:"center",fontSize:"10px",color:T.muted,fontWeight:"700"}}>@</div>
+        <div style={{textAlign:"right"}}>
+          <div style={{fontSize:"13px",fontWeight:"700",color:T.text}}>{pick.home} <span style={{fontSize:"9px",color:T.muted}}>HOME</span></div>
+          <div style={{fontSize:"10px",color:T.muted}}>{pick.mktHP}% mkt · #{pick.he.rank}</div>
+        </div>
+      </div>
+      <div style={{background:`${tc.color}12`,border:`1px solid ${tc.color}44`,borderRadius:"5px",padding:"10px 12px",marginBottom:"10px"}}>
+        <div style={{fontSize:"9px",color:tc.color,fontWeight:"700",letterSpacing:"1.5px",marginBottom:"5px"}}>ENGINE RECOMMENDATION</div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:"14px",fontWeight:"700",color:T.text}}>{recSide} {recSp!==null?(recSp>0?`+${recSp}`:recSp):"ML"}</div>
+            <div style={{fontSize:"10px",color:T.muted,marginTop:"2px"}}>Odds: {fml(recSpO)} · Model {parseFloat(pick.edge)>0?pick.modHP:(100-parseFloat(pick.modHP)).toFixed(1)}% vs mkt {parseFloat(pick.edge)>0?pick.mktHP:(100-parseFloat(pick.mktHP)).toFixed(1)}%</div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:"18px",fontWeight:"700",color:tc.color}}>${pick.wager}</div>
+            <div style={{fontSize:"9px",color:T.muted}}>WAGER</div>
+          </div>
+        </div>
+      </div>
+      <div style={{display:"flex",gap:"6px",flexWrap:"wrap",marginBottom:"8px"}}>
+        {[["SP HOME",pick.hSp!==null?(pick.hSp>0?`+${pick.hSp}`:pick.hSp):"—",T.accent],["SP AWAY",pick.aSp!==null?(pick.aSp>0?`+${pick.aSp}`:pick.aSp):"—",T.accent],["ML H",fml(pick.hML),T.green],["ML A",fml(pick.aML),T.red],["LINE",pick.lm!==null?(pick.lm>0?`▲+${pick.lm}`:`▼${pick.lm}`):"—",pick.lm>0?T.red:pick.lm<0?T.green:T.muted]].map(([l,v,c])=>(
+          <div key={l} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"4px",padding:"5px 8px",textAlign:"center",minWidth:"52px"}}>
+            <div style={{fontSize:"7px",color:T.muted,letterSpacing:"1px"}}>{l}</div>
+            <div style={{fontSize:"11px",fontWeight:"700",color:c}}>{v}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{height:"2px",background:T.border,borderRadius:"2px"}}><div style={{height:"2px",width:`${pick.conf}%`,background:tc.color,borderRadius:"2px"}}/></div>
+      {open&&(
+        <div style={{marginTop:"12px",paddingTop:"12px",borderTop:`1px solid ${T.border}`}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"12px"}}>
+            <div>
+              <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"8px"}}>EFFICIENCY</div>
+              {[[pick.away,pick.ae],[pick.home,pick.he]].map(([nm,ef])=>(
+                <div key={nm} style={{marginBottom:"10px"}}>
+                  <div style={{fontSize:"10px",color:T.accent,fontWeight:"700",marginBottom:"4px"}}>{nm.split(" ").slice(-1)[0]}</div>
+                  {[["Adj EM",ef.adjEM?.toFixed(1)],["Adj O",ef.adjO],["Adj D",ef.adjD],["Pace",ef.pace],["Def Reb",ef.defReb]].map(([l,v])=>(
+                    <div key={l} style={{display:"flex",justifyContent:"space-between",fontSize:"11px",marginBottom:"2px"}}>
+                      <span style={{color:T.muted}}>{l}</span><span style={{color:T.text,fontWeight:"600"}}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+            <div>
+              <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"8px"}}>CHECKLIST ({pick.cs}/8)</div>
+              {Object.entries(pick.cl).map(([k,v])=>{
+                const lbls={efficiencyMismatch:"Efficiency mismatch",noPublicBias:"No public bias",shortUnderdog:"Short dog +1 to +4",slowTempo:"Slow tempo",defReboundEdge:"Def reb edge",midMajorEdge:"Mid-major edge",valueDetected:"Model vs market",noLargeFavorite:"Spread ≤ 10"};
+                return<div key={k} style={{display:"flex",gap:"8px",fontSize:"11px",marginBottom:"4px",color:v?T.green:T.muted}}><span>{v?"✓":"·"}</span><span>{lbls[k]}</span></div>
+              })}
+              <div style={{marginTop:"8px",padding:"6px 8px",background:T.surface,borderRadius:"4px",fontSize:"10px",color:T.muted}}>
+                Edge: <span style={{color:T.accent}}>{pick.es}</span> · ML: <span style={{color:parseFloat(pick.edge)>0?T.green:T.red}}>{(parseFloat(pick.edge)*100).toFixed(1)}%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── BANKROLL TAB ──────────────────────────────────────────────────────────────
+function BankrollTab({bets,setBets,bankroll,setBankroll,ml,setResults,results}){
+  const[form,setForm]=useState({game:"",pick:"",type:"Spread",wager:"",odds:"-110"});
+  const u=calcUnits(bankroll);
+  const won=bets.filter(b=>b.result==="win").reduce((s,b)=>s+b.profit,0);
+  const lost=bets.filter(b=>b.result==="loss").reduce((s,b)=>s+b.wager,0);
+  const pending=bets.filter(b=>!b.result).reduce((s,b)=>s+b.wager,0);
+  const tb=bets.filter(b=>b.result).length,wb=bets.filter(b=>b.result==="win").length;
+  const roi=(won+lost)>0?(((won-lost)/(won+lost))*100).toFixed(1):"0.0";
+  const prog=Math.max(0,Math.min(100,((bankroll-300)/700)*100));
+  const scenarios=[{l:"3-1",w:3,lo:1},{l:"2-2",w:2,lo:2},{l:"4-0",w:4,lo:0},{l:"1-3",w:1,lo:3}].map(sc=>{const gain=sc.w*u.core*0.909,loss=sc.lo*u.core;return{...sc,net:(gain-loss).toFixed(2),proj:(bankroll+gain-loss).toFixed(2)}});
+  function addBet(){if(!form.game||!form.wager)return;const w=parseFloat(form.wager),ml2=parseFloat(form.odds);const profit=ml2>0?w*(ml2/100):w*(100/Math.abs(ml2));const nb={id:Date.now(),...form,wager:w,profit:+profit.toFixed(2),result:null,date:new Date().toLocaleDateString(),predictedProb:0.6};setBets(p=>{const u=[...p,nb];ss(STORAGE_KEYS.bets,u);return u});setForm(f=>({...f,game:"",pick:"",wager:""}))}
+  function settle(id,result){const bet=bets.find(b=>b.id===id);setBets(p=>{const u=p.map(b=>b.id===id?{...b,result}:b);ss(STORAGE_KEYS.bets,u);return u});const ao=result==="win"?1:0;const feats=ml.buildFeatures(getEff(bet.game.split("@")[1]?.trim()||""),getEff(bet.game.split("@")[0]?.trim()||""),-3.5,true,false);ml.learn(feats,bet.predictedProb||0.6,ao);ml.weights.totalBets++;if(result==="win")ml.weights.winningBets++;ml.save();const nr={game:bet.game,correct:ao===Math.round(bet.predictedProb||0.6),predictedProb:bet.predictedProb||0.6,result};setResults(r=>{const u=[...r,nr];ss(STORAGE_KEYS.results,u);return u});const delta=result==="win"?bet.profit:-bet.wager;setBankroll(p=>{const u=+(p+delta).toFixed(2);ss(STORAGE_KEYS.bankroll,u);return u})}
+  return(
+    <div style={{display:"grid",gridTemplateColumns:"min(300px,100%) 1fr",gap:"20px"}}>
+      <div>
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"16px",marginBottom:"12px"}}>
+          <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"8px"}}>BANKROLL</div>
+          <div style={{fontSize:"34px",fontWeight:"700",color:bankroll>=300?T.green:T.red,letterSpacing:"-1px"}}>${bankroll.toLocaleString()}</div>
+          <div style={{fontSize:"9px",color:T.muted,marginBottom:"10px"}}>TARGET $1,000 · STARTED $300</div>
+          <div style={{height:"4px",background:T.surface,borderRadius:"2px",marginBottom:"4px"}}><div style={{height:"4px",width:`${prog}%`,background:`linear-gradient(90deg,${T.accent},${T.green})`,borderRadius:"2px"}}/></div>
+          <div style={{fontSize:"9px",color:T.muted,display:"flex",justifyContent:"space-between",marginBottom:"12px"}}><span>$300</span><span style={{color:T.accent}}>{prog.toFixed(0)}%</span><span>$1,000</span></div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"6px"}}>
+            {[["WON",`$${won.toFixed(0)}`,T.green],["LOST",`$${lost.toFixed(0)}`,T.red],["ROI",`${roi}%`,parseFloat(roi)>=0?T.green:T.red]].map(([l,v,c])=>(
+              <div key={l} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"4px",padding:"8px",textAlign:"center"}}>
+                <div style={{fontSize:"13px",fontWeight:"700",color:c}}>{v}</div>
+                <div style={{fontSize:"8px",color:T.muted,marginTop:"2px"}}>{l}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{marginTop:"8px",fontSize:"10px",color:T.muted}}>RECORD: <span style={{color:T.green}}>{wb}W</span>-<span style={{color:T.red}}>{tb-wb}L</span> · PENDING: <span style={{color:T.gold}}>${pending.toFixed(2)}</span></div>
+        </div>
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"14px",marginBottom:"12px"}}>
+          <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"8px"}}>UNITS (2% BASE)</div>
+          {[["⭐ Anchor 2.5u",u.anchor,T.gold],["💰 Core 1.5u",u.core,T.green],["🎯 Optional 1u",u.optional,T.purple],["Max Daily 12%",u.maxDaily,T.red]].map(([l,v,c])=>(
+            <div key={l} style={{display:"flex",justifyContent:"space-between",fontSize:"11px",marginBottom:"5px"}}><span style={{color:T.muted}}>{l}</span><span style={{color:c,fontWeight:"700"}}>${v}</span></div>
+          ))}
+        </div>
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"14px",marginBottom:"12px"}}>
+          <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"8px"}}>SCENARIOS</div>
+          {scenarios.map(sc=>(
+            <div key={sc.l} style={{display:"flex",justifyContent:"space-between",fontSize:"11px",marginBottom:"5px",padding:"5px 8px",background:T.surface,borderRadius:"3px"}}>
+              <span style={{color:T.text,fontWeight:"700"}}>{sc.l}</span>
+              <span style={{color:parseFloat(sc.net)>=0?T.green:T.red}}>{parseFloat(sc.net)>=0?"+":""}${sc.net} → <strong>${sc.proj}</strong></span>
+            </div>
+          ))}
+        </div>
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"14px"}}>
+          <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"10px"}}>LOG BET</div>
+          {[["game","Game (Away @ Home)"],["pick","Your pick"],["wager","Wager ($)"],["odds","Odds (-110)"]].map(([k,ph])=>(
+            <input key={k} placeholder={ph} value={form[k]} type={k==="wager"||k==="odds"?"number":"text"} onChange={e=>setForm(p=>({...p,[k]:e.target.value}))} style={{...s.input,marginBottom:"8px"}}/>
+          ))}
+          <div style={{display:"flex",gap:"6px",marginBottom:"8px",flexWrap:"wrap"}}>
+            {["Spread","ML","Over","Under"].map(t=>(
+              <button key={t} onClick={()=>setForm(p=>({...p,type:t}))} style={{background:form.type===t?T.accent:T.surface,color:form.type===t?"#000":T.muted,border:`1px solid ${form.type===t?T.accent:T.border}`,padding:"4px 10px",borderRadius:"3px",cursor:"pointer",fontFamily:"inherit",fontSize:"10px",fontWeight:"700"}}>{t}</button>
+            ))}
+          </div>
+          <button onClick={addBet} style={{...s.btn(T.accent),width:"100%"}}>+ ADD BET</button>
+        </div>
+      </div>
+      <div>
+        <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"12px"}}>BET LEDGER — {bets.length} TOTAL</div>
+        {bets.length===0&&<div style={{textAlign:"center",color:T.muted,padding:"40px",border:`1px dashed ${T.border}`,borderRadius:"6px",fontSize:"11px"}}>NO BETS LOGGED</div>}
+        {[...bets].reverse().map(bet=>(
+          <div key={bet.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:bet.result==="win"?`${T.green}0a`:bet.result==="loss"?`${T.red}0a`:T.card,border:`1px solid ${bet.result==="win"?T.green+"44":bet.result==="loss"?T.red+"33":T.border}`,borderRadius:"4px",marginBottom:"8px",gap:"8px"}}>
+            <div>
+              <div style={{fontSize:"12px",fontWeight:"700",color:T.text,marginBottom:"2px"}}>{bet.pick} <span style={s.pill(T.purple)}>{bet.type}</span></div>
+              <div style={{fontSize:"10px",color:T.muted}}>{bet.game} · {bet.date}</div>
+            </div>
+            <div style={{textAlign:"right",flexShrink:0}}>
+              <div style={{fontSize:"12px",color:T.accent,marginBottom:"4px"}}>${bet.wager} → +${bet.profit}</div>
+              {!bet.result?(
+                <div style={{display:"flex",gap:"4px"}}>
+                  <button onClick={e=>{e.stopPropagation();settle(bet.id,"win")}} style={{...s.btn(T.green),fontSize:"9px",padding:"3px 8px"}}>WIN ✓</button>
+                  <button onClick={e=>{e.stopPropagation();settle(bet.id,"loss")}} style={{...s.btn(T.red,"#fff"),fontSize:"9px",padding:"3px 8px"}}>LOSS ✗</button>
+                </div>
+              ):<span style={s.pill(bet.result==="win"?T.green:T.red)}>{bet.result.toUpperCase()}</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── ML TAB ────────────────────────────────────────────────────────────────────
+function MLTab({model,results,onReset}){
+  const w=model.weights;
+  const feats=Object.entries({"Efficiency Margin":w.adjEM_diff,"Home Court":w.homeCourt,"Pace Factor":w.paceFactor,"Public Bias":w.publicBias,"Def Rebounding":w.defRebound,"Short Underdog":w.underdog_short,"Mid-Major":w.midMajorBonus,"Guard Advantage":w.guardAdvantage}).sort((a,b)=>Math.abs(b[1])-Math.abs(a[1]));
+  return(
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"20px"}}>
+      <div>
+        <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"12px"}}>MODEL PERFORMANCE</div>
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"16px",marginBottom:"12px"}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px",marginBottom:"12px"}}>
+            {[["Predictions",w.totalPredictions,T.accent],["Accuracy",`${model.accuracy}%`,T.green],["Bets",w.totalBets,T.purple],["Win Rate",`${model.winRate}%`,T.gold]].map(([l,v,c])=>(
+              <div key={l} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"4px",padding:"10px",textAlign:"center"}}>
+                <div style={{fontSize:"18px",fontWeight:"700",color:c}}>{v}</div>
+                <div style={{fontSize:"9px",color:T.muted,marginTop:"3px"}}>{l}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{fontSize:"10px",color:T.muted,lineHeight:"1.8"}}>Cal. error: <span style={{color:T.accent}}>{((w.calibrationError||0)*100).toFixed(2)}%</span><br/>Learning rate: <span style={{color:T.text}}>{w.learningRate}</span></div>
+          <button onClick={onReset} style={{...s.btn(T.surface,T.red),marginTop:"10px",border:`1px solid ${T.red}44`,fontSize:"10px",padding:"5px 12px"}}>RESET MODEL</button>
+        </div>
+        <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"10px"}}>RECENT RESULTS</div>
+        {results.length===0?<div style={{fontSize:"11px",color:T.muted,padding:"20px",textAlign:"center",border:`1px dashed ${T.border}`,borderRadius:"6px"}}>Settle bets to train the model.</div>:results.slice(-8).reverse().map((r,i)=>(
+          <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"7px 10px",background:T.card,border:`1px solid ${r.correct?T.green+"33":T.red+"22"}`,borderRadius:"4px",marginBottom:"5px",fontSize:"11px"}}>
+            <span style={{color:T.text}}>{r.game}</span>
+            <span style={{color:r.correct?T.green:T.red,fontWeight:"700"}}>{r.correct?"✓":"✗"} {(r.predictedProb*100).toFixed(0)}%</span>
+          </div>
+        ))}
+      </div>
+      <div>
+        <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"12px"}}>LEARNED WEIGHTS</div>
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"16px"}}>
+          <div style={{fontSize:"10px",color:T.muted,marginBottom:"12px",lineHeight:"1.6"}}>Updates after every settled bet via gradient descent.</div>
+          {feats.map(([nm,wt])=>{
+            const pct=Math.abs(wt)/5*100,col=wt>0?T.green:T.red;
+            return(
+              <div key={nm} style={{marginBottom:"10px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",marginBottom:"3px"}}>
+                  <span style={{color:T.text}}>{nm}</span>
+                  <span style={{color:col,fontWeight:"700"}}>{wt>0?"+":""}{wt.toFixed(3)}</span>
+                </div>
+                <div style={{height:"4px",background:T.surface,borderRadius:"2px"}}><div style={{height:"4px",width:`${pct}%`,background:col,borderRadius:"2px",opacity:0.8}}/></div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── MAIN APP ──────────────────────────────────────────────────────────────────
+function App(){
+  const[tab,setTab]=useState("card");
+  const[analyzed,setAnalyzed]=useState([]);
+  const[card,setCard]=useState(null);
+  const[loading,setLoading]=useState(false);
+  const[error,setError]=useState(null);
+  const[updated,setUpdated]=useState(null);
+  const[callsLeft,setCallsLeft]=useState(null);
+  const[proxyUrl,setProxyUrl]=useState(()=>sg(STORAGE_KEYS.proxy,""));
+  const[proxyInput,setProxyInput]=useState("");
+  const[bankroll,setBankroll]=useState(()=>sg(STORAGE_KEYS.bankroll,300));
+  const[bets,setBets]=useState(()=>sg(STORAGE_KEYS.bets,[]));
+  const[results,setResults]=useState(()=>sg(STORAGE_KEYS.results,[]));
+  const mlRef=useRef(new MLModel(sg(STORAGE_KEYS.model,null)));
+  const ml=mlRef.current;
+
+  const DEMO=[
+    {id:"d1",home_team:"Houston Cougars",away_team:"Baylor Bears",commence_time:new Date().toISOString(),bookmakers:[{key:"dk",markets:[{key:"h2h",outcomes:[{name:"Houston Cougars",price:-800},{name:"Baylor Bears",price:550}]},{key:"spreads",outcomes:[{name:"Houston Cougars",point:-15.5,price:-110},{name:"Baylor Bears",point:15.5,price:-110}]}]}]},
+    {id:"d2",home_team:"Purdue Boilermakers",away_team:"Northwestern Wildcats",commence_time:new Date().toISOString(),bookmakers:[{key:"dk",markets:[{key:"h2h",outcomes:[{name:"Purdue Boilermakers",price:-600},{name:"Northwestern Wildcats",price:430}]},{key:"spreads",outcomes:[{name:"Purdue Boilermakers",point:-10.5,price:-110},{name:"Northwestern Wildcats",point:10.5,price:-110}]}]}]},
+    {id:"d3",home_team:"Villanova Wildcats",away_team:"DePaul Blue Demons",commence_time:new Date().toISOString(),bookmakers:[{key:"dk",markets:[{key:"h2h",outcomes:[{name:"Villanova Wildcats",price:-200},{name:"DePaul Blue Demons",price:168}]},{key:"spreads",outcomes:[{name:"Villanova Wildcats",point:-3.5,price:-110},{name:"DePaul Blue Demons",point:3.5,price:-110}]}]}]},
+    {id:"d4",home_team:"Wisconsin Badgers",away_team:"Maryland Terrapins",commence_time:new Date().toISOString(),bookmakers:[{key:"dk",markets:[{key:"h2h",outcomes:[{name:"Wisconsin Badgers",price:-900},{name:"Maryland Terrapins",price:620}]},{key:"spreads",outcomes:[{name:"Wisconsin Badgers",point:-14.5,price:-110},{name:"Maryland Terrapins",point:14.5,price:-110}]}]}]},
+  ];
+
+  function loadDemo(){const e=DEMO.map(g=>analyzeGame(g,ml,bankroll)).sort((a,b)=>b.conf-a.conf);setAnalyzed(e);setCard(buildCard(e,bankroll));}
+
+  const fetchOdds=useCallback(async(proxy=proxyUrl)=>{
+    if(!proxy){setError("Enter your proxy URL to load live odds.");loadDemo();return;}
+    setLoading(true);setError(null);
+    try{
+      const base=proxy.replace(/\/$/,"");
+      const url=`${base}/odds/sports/${SPORT}/odds/?regions=${REGIONS}&markets=${MARKETS}&bookmakers=${BOOKMAKERS}&oddsFormat=american`;
+      const res=await fetch(url);
+      if(!res.ok)throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      setCallsLeft(res.headers.get("x-requests-remaining"));
+      const data=await res.json();
+      const e=data.map(g=>analyzeGame(g,ml,bankroll)).sort((a,b)=>b.conf-a.conf);
+      setAnalyzed(e);setCard(buildCard(e,bankroll));setUpdated(new Date().toLocaleTimeString());
+    }catch(e){setError(e.message);loadDemo();}
+    finally{setLoading(false);}
+  },[proxyUrl,bankroll]);
+
+  useEffect(()=>{proxyUrl?fetchOdds():loadDemo();},[]);
+
+  function resetModel(){mlRef.current=new MLModel(null);ss(STORAGE_KEYS.model,null);setResults([]);ss(STORAGE_KEYS.results,[]);}
+
+  const TABS=[{id:"card",label:"📋 Card"},{id:"odds",label:"📊 Games"},{id:"bankroll",label:"💰 Bankroll"},{id:"ml",label:"🤖 ML"}];
+
+  return(
+    <div style={{background:T.bg,minHeight:"100vh",fontFamily:"'JetBrains Mono','Fira Code','Courier New',monospace",color:T.text}}>
+      {/* Header */}
+      <div style={{background:"linear-gradient(180deg,#08101e 0%,#07090f 100%)",borderBottom:`1px solid ${T.border}`,padding:"12px 16px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:"8px"}}>
+          <div>
+            <div style={{fontSize:"15px",fontWeight:"700",color:T.accent,letterSpacing:"2px"}}>▸ NCAAMB EDGE <span style={{fontSize:"9px",color:T.muted}}>v4 · ML</span></div>
+            <div style={{fontSize:"8px",color:T.muted,letterSpacing:"1px",marginTop:"2px"}}>{updated?`UPDATED ${updated}`:"LIVE ODDS · EFFICIENCY · ML"}{callsLeft?` · ${callsLeft} CALLS LEFT`:""}</div>
+          </div>
+          <div style={{display:"flex",gap:"12px",alignItems:"center"}}>
+            <div style={{textAlign:"right"}}><div style={{fontSize:"8px",color:T.muted}}>BANKROLL</div><div style={{fontSize:"20px",fontWeight:"700",color:bankroll>=300?T.green:T.red}}>${bankroll.toLocaleString()}</div></div>
+            <div style={{textAlign:"right"}}><div style={{fontSize:"8px",color:T.muted}}>MODEL</div><div style={{fontSize:"20px",fontWeight:"700",color:T.accent}}>{ml.accuracy}%</div></div>
+            <button onClick={()=>fetchOdds()} disabled={loading} style={s.btn(loading?T.surface:T.accent)}>
+              {loading?<span style={{display:"inline-block",width:"12px",height:"12px",border:`2px solid ${T.accent}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>:"↻"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Proxy banner */}
+      {!proxyUrl&&(
+        <div style={{background:`${T.gold}12`,borderBottom:`1px solid ${T.gold}44`,padding:"10px 16px"}}>
+          <div style={{fontSize:"10px",color:T.gold,fontWeight:"700",marginBottom:"8px"}}>⚠ ENTER YOUR RENDER PROXY URL TO LOAD LIVE ODDS:</div>
+          <div style={{display:"flex",gap:"8px"}}>
+            <input value={proxyInput} onChange={e=>setProxyInput(e.target.value)} placeholder="https://ncaamb-edge-proxy.onrender.com" style={{...s.input,border:`1px solid ${T.gold}55`,flex:1,padding:"7px 12px"}}/>
+            <button onClick={()=>{const c=proxyInput.trim().replace(/\/$/,"");setProxyUrl(c);ss(STORAGE_KEYS.proxy,c);fetchOdds(c);}} style={s.btn(T.gold)}>CONNECT</button>
+          </div>
+        </div>
+      )}
+      {proxyUrl&&(
+        <div style={{background:`${T.green}0a`,borderBottom:`1px solid ${T.green}33`,padding:"6px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:"9px",color:T.green}}>✓ PROXY: {proxyUrl}</span>
+          <button onClick={()=>{setProxyUrl("");ss(STORAGE_KEYS.proxy,"");}} style={{background:"transparent",border:"none",color:T.muted,fontSize:"10px",cursor:"pointer",fontFamily:"inherit"}}>DISCONNECT</button>
+        </div>
+      )}
+
+      {/* Nav */}
+      <div style={{background:T.surface,borderBottom:`1px solid ${T.border}`,padding:"0 16px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex"}}>
+          {TABS.map(t=>(
+            <button key={t.id} onClick={()=>setTab(t.id)} style={{background:"transparent",color:tab===t.id?T.accent:T.muted,border:"none",borderBottom:tab===t.id?`2px solid ${T.accent}`:"2px solid transparent",padding:"12px 14px",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",fontWeight:"700",transition:"all 0.15s"}}>{t.label}</button>
+          ))}
+        </div>
+        <span style={{fontSize:"8px",color:T.muted}}>{analyzed.length} GAMES · {analyzed.filter(a=>a.isVal).length} VALUE</span>
+      </div>
+
+      {/* Content */}
+      <div style={{padding:"16px",maxWidth:"1140px",margin:"0 auto"}}>
+        {error&&<div style={{background:`${T.red}0f`,border:`1px solid ${T.red}44`,borderRadius:"6px",padding:"10px 14px",marginBottom:"16px",fontSize:"11px",color:T.red}}>⚠ {error}</div>}
+
+        {tab==="card"&&card&&(
+          <div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:"8px",marginBottom:"16px"}}>
+              {[["PICKS",card.picks.length,T.accent],["EXPOSURE",`$${card.exp}`,T.gold],["MAX",`$${card.units.maxDaily}`,T.muted],["UNIT",`$${card.units.unit}`,T.purple]].map(([l,v,c])=>(
+                <div key={l} style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"12px",textAlign:"center"}}>
+                  <div style={{fontSize:"18px",fontWeight:"700",color:c}}>{v}</div>
+                  <div style={{fontSize:"8px",color:T.muted,marginTop:"3px"}}>{l}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr min(280px,35%)",gap:"16px"}}>
+              <div>
+                <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"12px"}}>TODAY'S PICKS · TAP TO EXPAND</div>
+                {card.picks.length===0?<div style={{textAlign:"center",color:T.muted,padding:"60px",border:`1px dashed ${T.border}`,borderRadius:"6px",fontSize:"11px"}}>NO QUALIFYING PICKS TODAY</div>:card.picks.map((p,i)=><PickCard key={p.id} pick={p} showDetail={i===0}/>)}
+              </div>
+              <div>
+                {card.traps.length>0&&(
+                  <div style={{background:T.card,border:`1px solid ${T.red}33`,borderRadius:"6px",padding:"14px",marginBottom:"12px"}}>
+                    <div style={{fontSize:"9px",color:T.red,letterSpacing:"2px",marginBottom:"10px"}}>🚫 AVOID — TRAPS</div>
+                    {card.traps.map((g,i)=>(
+                      <div key={i} style={{padding:"7px 10px",background:`${T.red}08`,border:`1px solid ${T.red}22`,borderRadius:"4px",marginBottom:"6px"}}>
+                        <div style={{fontSize:"11px",fontWeight:"700",color:T.text,marginBottom:"2px"}}>{g.away.split(" ").slice(-1)[0]} @ {g.home.split(" ").slice(-1)[0]}</div>
+                        <div style={{fontSize:"10px",color:T.muted}}>{g.isLF?"Large fav ":""}{g.pubPen?"Public bias ":""}{g.cs<2?"Low score":""}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"14px"}}>
+                  <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"10px"}}>RULES</div>
+                  {[["✓","Spreads only",T.green],["✓","Max 12% daily",T.green],["✓","3-4 bets/day",T.green],["✗","No parlays",T.red],["✗","No favs >-10",T.red],["✓","Short dogs +1-4",T.gold]].map(([icon,rule,c])=>(
+                    <div key={rule} style={{fontSize:"10px",color:T.muted,marginBottom:"4px",display:"flex",gap:"8px"}}><span style={{color:c}}>{icon}</span><span>{rule}</span></div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab==="odds"&&(
+          <div>
+            <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"14px"}}>ALL GAMES — TAP TO EXPAND</div>
+            {analyzed.map((a,i)=><PickCard key={a.id} pick={{...a,tier:getTier(i,a.es),wager:i===0?calcUnits(bankroll).anchor:i<=2?calcUnits(bankroll).core:calcUnits(bankroll).optional,rank:i+1}}/>)}
+          </div>
+        )}
+
+        {tab==="bankroll"&&<BankrollTab bets={bets} setBets={setBets} bankroll={bankroll} setBankroll={setBankroll} ml={ml} setResults={setResults} results={results}/>}
+        {tab==="ml"&&<MLTab model={ml} results={results} onReset={resetModel}/>}
+      </div>
+
+      <div style={{borderTop:`1px solid ${T.border}`,padding:"12px 16px",textAlign:"center",fontSize:"8px",color:T.muted}}>
+        ⚠ FOR ENTERTAINMENT ONLY · GAMBLE RESPONSIBLY · VERIFY LEGALITY IN YOUR JURISDICTION
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
