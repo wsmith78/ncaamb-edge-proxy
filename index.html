@@ -33,7 +33,7 @@ const {useState,useEffect,useCallback,useRef}=React;
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 const SPORT="basketball_ncaab",REGIONS="us",MARKETS="h2h,spreads",BOOKMAKERS="draftkings,fanduel,betmgm,caesars";
-const SK={model:"ncaamb_ml_v5",bets:"ncaamb_bets_v5",bankroll:"ncaamb_br_v5",results:"ncaamb_res_v5",proxy:"ncaamb_proxy_v5",espn:"ncaamb_espn_v2"};
+const SK={model:"ncaamb_ml_v5",bets:"ncaamb_bets_v5",bankroll:"ncaamb_br_v5",results:"ncaamb_res_v5",proxy:"ncaamb_proxy_v5",espn:"ncaamb_espn_v3"};
 const T={bg:"#07090f",surface:"#0c1018",card:"#10161f",border:"#18243a",accent:"#00e5ff",green:"#00e676",red:"#ff3d57",gold:"#ffd600",purple:"#b388ff",orange:"#ff9100",text:"#dce8f8",muted:"#4a5a7a"};
 const ESPN_BASE="https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball";
 const ESPN_TTL=4*3600*1000;
@@ -296,7 +296,7 @@ async function buildESPNCache(){
   const td={};let fetched=0;
   try{
     const prs=Array.from({length:10},(_,d)=>
-      fetch(`${ESPN_BASE}/scoreboard?dates=${espnDs(d)}&groups=100&limit=500`)
+      fetch(`${ESPN_BASE}/scoreboard?dates=${espnDs(d)}&limit=500`)
         .then(r=>r.ok?r.json():null).catch(()=>null)
     );
     const rr=await Promise.all(prs);
@@ -305,7 +305,7 @@ async function buildESPNCache(){
       fetched++;
       data.events.forEach(evt=>{
         const comp=evt.competitions?.[0];
-        if(!comp?.status?.type?.completed)return;
+        const st=comp?.status?.type;if(!st?.completed&&st?.name!=="STATUS_FINAL")return;
         const compTs=evt.competitions?.[0]?.competitors||[];
         const scores=Object.fromEntries(compTs.map(c=>[c.homeAway,parseInt(c.score)||0]));
         const margin=(scores.home||0)-(scores.away||0);
@@ -489,7 +489,8 @@ function buildCard(analyzed,br){
     if(exp+w>units.maxDaily)continue;
     picks.push({...g,tier,wager:w,rank:picks.length+1});exp+=w;
   }
-  const traps=analyzed.filter(a=>a.pubPen||a.isLF||(a.cs<2&&parseFloat(a.mktHP)>75)).slice(0,3);
+  const pickIds=new Set(picks.map(p=>p.id));
+  const traps=analyzed.filter(a=>!pickIds.has(a.id)&&(a.pubPen||a.isLF||(a.cs<2&&parseFloat(a.mktHP)>75))).slice(0,3);
   return{picks,traps,exp:exp.toFixed(2),units,anchorCount:ac,coreCount:cc,optCount:oc};
 }
 
