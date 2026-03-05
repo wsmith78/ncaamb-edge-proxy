@@ -1,9 +1,8 @@
-// NCAAMB Edge — Odds API Proxy Server v2
+// NCAAMB Edge — Odds API Proxy Server v3
 // Deploys free to Render.com · node server.js
 
 const https = require("https");
 const http = require("http");
-const url = require("url");
 
 const PORT = process.env.PORT || 3000;
 const ODDS_API_KEY = process.env.ODDS_API_KEY || "";
@@ -33,7 +32,7 @@ function proxyRequest(targetUrl, res) {
 }
 
 const server = http.createServer((req, res) => {
-  const parsed = url.parse(req.url, true);
+  const parsed = new URL(req.url, `http://localhost:${PORT}`);
   const path = parsed.pathname;
 
   // CORS preflight
@@ -44,7 +43,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Root — status page (visit this to confirm proxy is alive)
+  // Root — status page
   if (path === "/" || path === "") {
     setCORS(res);
     res.setHeader("Content-Type", "application/json");
@@ -52,6 +51,7 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({
       status: "ok",
       service: "NCAAMB Edge Proxy",
+      version: "v3",
       hasApiKey: !!ODDS_API_KEY,
       message: ODDS_API_KEY
         ? "Proxy is live. API key is set."
@@ -61,7 +61,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Health check
+  // Health check (used by keepalive pings)
   if (path === "/health") {
     setCORS(res);
     res.setHeader("Content-Type", "application/json");
@@ -82,12 +82,9 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    // Strip /odds/ prefix, forward to the-odds-api.com/v4/
     const pathParts = path.replace(/^\/odds\//, "");
-    const queryParams = { ...parsed.query, apiKey: ODDS_API_KEY };
-    const queryString = Object.entries(queryParams)
-      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
-      .join("&");
+    parsed.searchParams.set("apiKey", ODDS_API_KEY);
+    const queryString = parsed.searchParams.toString().replace(/%2C/g, ",");
 
     const targetUrl = `https://api.the-odds-api.com/v4/${pathParts}?${queryString}`;
     console.log(`[${new Date().toISOString()}] → ${pathParts}`);
@@ -103,6 +100,6 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`NCAAMB Edge Proxy v2 on port ${PORT}`);
+  console.log(`NCAAMB Edge Proxy v3 on port ${PORT}`);
   console.log(`API Key: ${ODDS_API_KEY ? "✓ Set" : "✗ MISSING — set ODDS_API_KEY in Render"}`);
 });
