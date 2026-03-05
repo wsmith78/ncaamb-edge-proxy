@@ -229,6 +229,8 @@ function PickCard({pick,showDetail}){
 // ── BANKROLL TAB ──────────────────────────────────────────────────────────────
 function BankrollTab({bets,setBets,bankroll,setBankroll,ml,setResults,results}){
   const[form,setForm]=useState({game:"",pick:"",type:"Spread",wager:"",odds:"-110"});
+  const[editingBR,setEditingBR]=useState(false);
+  const[brInput,setBrInput]=useState("");
   const u=calcUnits(bankroll);
   const won=bets.filter(b=>b.result==="win").reduce((s,b)=>s+b.profit,0);
   const lost=bets.filter(b=>b.result==="loss").reduce((s,b)=>s+b.wager,0);
@@ -244,8 +246,22 @@ function BankrollTab({bets,setBets,bankroll,setBankroll,ml,setResults,results}){
       <div>
         <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"16px",marginBottom:"12px"}}>
           <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"8px"}}>BANKROLL</div>
-          <div style={{fontSize:"34px",fontWeight:"700",color:bankroll>=300?T.green:T.red,letterSpacing:"-1px"}}>${bankroll.toLocaleString()}</div>
-          <div style={{fontSize:"9px",color:T.muted,marginBottom:"10px"}}>TARGET $1,000 · STARTED $300</div>
+          {editingBR?(
+            <div style={{display:"flex",gap:"8px",alignItems:"center",marginBottom:"10px"}}>
+              <input autoFocus type="number" value={brInput} onChange={e=>setBrInput(e.target.value)}
+                style={{...s.input,fontSize:"22px",fontWeight:"700",color:T.green,width:"140px",padding:"6px 10px"}}
+                onKeyDown={e=>{if(e.key==="Enter"){const v=parseFloat(brInput);if(!isNaN(v)&&v>0){setBankroll(v);ss(STORAGE_KEYS.bankroll,v);}setEditingBR(false);}
+                if(e.key==="Escape")setEditingBR(false);}}/>
+              <button onClick={()=>{const v=parseFloat(brInput);if(!isNaN(v)&&v>0){setBankroll(v);ss(STORAGE_KEYS.bankroll,v);}setEditingBR(false);}} style={s.btn(T.green)}>SAVE</button>
+              <button onClick={()=>setEditingBR(false)} style={{...s.btn(T.surface,T.muted),border:`1px solid ${T.border}`}}>CANCEL</button>
+            </div>
+          ):(
+            <div style={{display:"flex",alignItems:"baseline",gap:"10px",marginBottom:"10px"}}>
+              <div style={{fontSize:"34px",fontWeight:"700",color:bankroll>=300?T.green:T.red,letterSpacing:"-1px",cursor:"pointer"}} onClick={()=>{setBrInput(bankroll.toString());setEditingBR(true);}}>${bankroll.toLocaleString()}</div>
+              <button onClick={()=>{setBrInput(bankroll.toString());setEditingBR(true);}} style={{background:"transparent",border:`1px solid ${T.border}`,color:T.muted,fontSize:"9px",padding:"3px 8px",borderRadius:"3px",cursor:"pointer",fontFamily:"inherit",letterSpacing:"1px"}}>EDIT</button>
+            </div>
+          )}
+          <div style={{fontSize:"9px",color:T.muted,marginBottom:"10px"}}>TARGET $1,000 · STARTED $300 · <span style={{color:T.muted}}>tap amount or EDIT to adjust</span></div>
           <div style={{height:"4px",background:T.surface,borderRadius:"2px",marginBottom:"4px"}}><div style={{height:"4px",width:`${prog}%`,background:`linear-gradient(90deg,${T.accent},${T.green})`,borderRadius:"2px"}}/></div>
           <div style={{fontSize:"9px",color:T.muted,display:"flex",justifyContent:"space-between",marginBottom:"12px"}}><span>$300</span><span style={{color:T.accent}}>{prog.toFixed(0)}%</span><span>$1,000</span></div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"6px"}}>
