@@ -33,7 +33,7 @@ const {useState,useEffect,useCallback,useRef}=React;
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 const SPORT="basketball_ncaab",REGIONS="us",MARKETS="h2h,spreads",BOOKMAKERS="draftkings,fanduel,betmgm,caesars";
-const SK={model:"ncaamb_ml_v5",bets:"ncaamb_bets_v5",bankroll:"ncaamb_br_v5",results:"ncaamb_res_v5",proxy:"ncaamb_proxy_v5",espn:"ncaamb_espn_v3"};
+const SK={model:"ncaamb_ml_v5",bets:"ncaamb_bets_v5",bankroll:"ncaamb_br_v5",results:"ncaamb_res_v5",proxy:"ncaamb_proxy_v5",espn:"ncaamb_espn_v3",meta:"ncaamb_meta_v1"};
 const T={bg:"#07090f",surface:"#0c1018",card:"#10161f",border:"#18243a",accent:"#00e5ff",green:"#00e676",red:"#ff3d57",gold:"#ffd600",purple:"#b388ff",orange:"#ff9100",text:"#dce8f8",muted:"#4a5a7a"};
 const ESPN_BASE="https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball";
 const ESPN_TTL=4*3600*1000;
@@ -358,6 +358,38 @@ const TE={
   "SIUE":{rank:89,adjEM:2.8,adjO:103.2,adjD:100.4,pace:67.8,defReb:70.2,toRate:17.0,efg:49.6},
   "Tennessee Tech":{rank:86,adjEM:3.2,adjO:103.6,adjD:100.4,pace:67.4,defReb:70.6,toRate:17.0,efg:49.8},
   "Tennessee Martin":{rank:87,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.6,defReb:70.4,toRate:17.0,efg:49.8},
+  "Florida International":{rank:85,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.6,defReb:70.6,toRate:17.0,efg:49.8},
+  "Texas A&M Commerce":{rank:89,adjEM:2.8,adjO:103.2,adjD:100.4,pace:68.2,defReb:70.2,toRate:17.2,efg:49.6},
+  "Texas A&M Corpus Christi":{rank:90,adjEM:2.6,adjO:103.0,adjD:100.4,pace:68.4,defReb:70.0,toRate:17.2,efg:49.4},
+  "Houston Baptist":{rank:88,adjEM:3.0,adjO:103.4,adjD:100.4,pace:68.0,defReb:70.4,toRate:17.0,efg:49.8},
+  "Incarnate Word":{rank:87,adjEM:3.0,adjO:103.4,adjD:100.4,pace:68.2,defReb:70.4,toRate:17.0,efg:49.8},
+  "Saint Francis":{rank:92,adjEM:2.2,adjO:103.0,adjD:100.8,pace:67.2,defReb:70.2,toRate:17.2,efg:49.4},
+  "Stony Brook":{rank:86,adjEM:3.2,adjO:103.6,adjD:100.4,pace:67.4,defReb:70.6,toRate:16.8,efg:50.0},
+  "Hofstra":{rank:74,adjEM:4.8,adjO:105.0,adjD:100.2,pace:68.4,defReb:71.2,toRate:16.6,efg:50.6},
+  "Northeastern":{rank:72,adjEM:5.2,adjO:105.4,adjD:100.2,pace:67.8,defReb:71.4,toRate:16.4,efg:50.8},
+  "Delaware":{rank:76,adjEM:4.4,adjO:104.8,adjD:100.4,pace:67.6,defReb:71.0,toRate:16.6,efg:50.4},
+  "Drexel":{rank:83,adjEM:3.6,adjO:104.0,adjD:100.4,pace:67.4,defReb:70.8,toRate:16.8,efg:50.2},
+  "Elon":{rank:84,adjEM:3.4,adjO:103.8,adjD:100.4,pace:67.6,defReb:70.6,toRate:16.8,efg:50.0},
+  "Towson":{rank:80,adjEM:4.0,adjO:104.4,adjD:100.4,pace:67.8,defReb:71.0,toRate:16.8,efg:50.2},
+  "William & Mary":{rank:85,adjEM:3.4,adjO:103.8,adjD:100.4,pace:66.8,defReb:70.8,toRate:16.8,efg:50.0},
+  "UNCW":{rank:78,adjEM:4.2,adjO:104.6,adjD:100.4,pace:68.0,defReb:71.0,toRate:16.6,efg:50.4},
+  "Charleston":{rank:70,adjEM:5.6,adjO:105.8,adjD:100.2,pace:68.2,defReb:71.4,toRate:16.4,efg:50.8},
+  "Chattanooga":{rank:75,adjEM:4.6,adjO:105.0,adjD:100.4,pace:68.0,defReb:71.2,toRate:16.6,efg:50.4},
+  "Furman":{rank:77,adjEM:4.4,adjO:104.8,adjD:100.4,pace:67.4,defReb:71.0,toRate:16.6,efg:50.4},
+  "Mercer":{rank:82,adjEM:3.8,adjO:104.2,adjD:100.4,pace:67.6,defReb:70.8,toRate:16.8,efg:50.0},
+  "Samford":{rank:79,adjEM:4.0,adjO:104.4,adjD:100.4,pace:67.8,defReb:70.8,toRate:16.8,efg:50.2},
+  "ETSU":{rank:73,adjEM:5.0,adjO:105.2,adjD:100.2,pace:68.2,defReb:71.2,toRate:16.6,efg:50.6},
+  "VMI":{rank:91,adjEM:2.4,adjO:103.0,adjD:100.6,pace:69.2,defReb:69.6,toRate:17.4,efg:49.2},
+  "Wofford":{rank:81,adjEM:3.8,adjO:104.2,adjD:100.4,pace:67.2,defReb:71.2,toRate:16.4,efg:50.6},
+  "Western Carolina":{rank:86,adjEM:3.2,adjO:103.6,adjD:100.4,pace:67.4,defReb:70.6,toRate:17.0,efg:49.8},
+  "Gardner Webb":{rank:85,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.0,defReb:70.6,toRate:17.0,efg:49.8},
+  "High Point":{rank:83,adjEM:3.6,adjO:104.0,adjD:100.4,pace:67.8,defReb:70.8,toRate:16.8,efg:50.0},
+  "Longwood":{rank:84,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.2,defReb:70.6,toRate:17.0,efg:49.8},
+  "Presbyterian":{rank:92,adjEM:2.2,adjO:102.8,adjD:100.6,pace:67.4,defReb:70.0,toRate:17.4,efg:49.2},
+  "USC Upstate":{rank:90,adjEM:2.6,adjO:103.2,adjD:100.6,pace:67.6,defReb:70.2,toRate:17.2,efg:49.4},
+  "Campbell":{rank:82,adjEM:3.8,adjO:104.2,adjD:100.4,pace:68.0,defReb:70.8,toRate:16.8,efg:50.2},
+  "North Alabama":{rank:87,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.8,defReb:70.4,toRate:17.0,efg:49.8},
+  "Queens":{rank:88,adjEM:2.8,adjO:103.2,adjD:100.4,pace:67.6,defReb:70.4,toRate:17.0,efg:49.6},
   "Alcorn State":{rank:89,adjEM:1.4,adjO:101.0,adjD:99.6,pace:70.4,defReb:69.4,toRate:18.6,efg:48.2},
   "South Carolina State":{rank:95,adjEM:0.8,adjO:100.4,adjD:99.6,pace:68.2,defReb:69.4,toRate:18.8,efg:48.2},
   "Arkansas-Pine Bluff":{rank:88,adjEM:1.8,adjO:101.4,adjD:99.6,pace:71.2,defReb:69.8,toRate:18.8,efg:48.4},
@@ -473,6 +505,72 @@ async function buildESPNCache(){
     return{data:cached?.data||{},source:"failed",ts:cached?.ts||0,teams:0};
   }
 }
+// ── ESPN META ENGINE (rankings · injuries · neutral site · conf tourney · records) ──
+async function fetchESPNMeta(){
+  const cached=sg(SK.meta,null),now=Date.now();
+  if(cached&&cached.ts&&(now-cached.ts)<1800000)return cached;
+  const meta={ts:now,rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}};
+  try{
+    const rRes=await fetch(`${ESPN_BASE}/rankings`).then(r=>r.ok?r.json():null).catch(()=>null);
+    if(rRes?.rankings){
+      rRes.rankings.forEach(poll=>{
+        if(!(poll.name||"").includes("AP"))return;
+        (poll.ranks||[]).forEach(r=>{
+          const raw=r.team?.displayName||"";
+          const k=normalizeTeamName(raw);
+          const match=TE[k]?k:Object.keys(TE).find(t=>t.toLowerCase()===k.toLowerCase())||
+            (()=>{const w=k.split(" ");for(let i=1;i<w.length;i++){const c=w.slice(0,w.length-i).join(" ");if(TE[c])return c;}return null;})();
+          if(match)meta.rankings[match]=r.current;
+        });
+      });
+    }
+    const today=new Date().toISOString().slice(0,10).replace(/-/g,"");
+    const tRes=await fetch(`${ESPN_BASE}/scoreboard?dates=${today}&groups=50&limit=300`).then(r=>r.ok?r.json():null).catch(()=>null);
+    if(tRes?.events){
+      tRes.events.forEach(evt=>{
+        const comp=evt.competitions?.[0];if(!comp)return;
+        const teams=comp.competitors||[];
+        const away=teams.find(t=>t.homeAway==="away");
+        const home=teams.find(t=>t.homeAway==="home");
+        if(!away||!home)return;
+        const awayN=away.team?.displayName||"";
+        const homeN=home.team?.displayName||"";
+        const gkey=`${awayN}@${homeN}`;
+        if(comp.neutralSite)meta.neutralGames[gkey]=true;
+        const notes=(comp.notes||[]).map(n=>(n.headline||n.text||"")).join(" ").toLowerCase();
+        if(notes.includes("conference")||notes.includes("tourney")||notes.includes("tournament")||
+           (evt.season?.slug||"").includes("tournament")||(evt.seasonType?.name||"").includes("Tournament")){
+          meta.confTourneyGames[gkey]=true;
+          meta.neutralGames[gkey]=true;
+        }
+        teams.forEach(t=>{
+          const n2=normalizeTeamName(t.team?.displayName||"");
+          const rec=(t.records||[]).find(r=>r.type==="total")||t.records?.[0];
+          if(n2&&rec?.summary)meta.records[n2]=rec.summary;
+        });
+      });
+    }
+    const nRes=await fetch(`${ESPN_BASE}/news?limit=80`).then(r=>r.ok?r.json():null).catch(()=>null);
+    if(nRes?.articles){
+      nRes.articles.forEach(art=>{
+        const hl=art.headline||"";
+        const lo=hl.toLowerCase();
+        if(!lo.includes("injur")&&!lo.includes(" out ")&&!lo.includes("questionable")&&
+           !lo.includes("doubtful")&&!lo.includes("suspend")&&!lo.includes("day-to-day"))return;
+        Object.keys(TE).forEach(tn=>{
+          if(hl.includes(tn)||(tn.split(" ").length>1&&hl.toLowerCase().includes(tn.toLowerCase()))){
+            if(!meta.injuries[tn])meta.injuries[tn]=[];
+            if(meta.injuries[tn].length<3)meta.injuries[tn].push(hl);
+          }
+        });
+      });
+    }
+    ss(SK.meta,meta);
+  }catch(e){console.warn("ESPN meta:",e.message);}
+  return meta;
+}
+
+
 function getSchedCtx(key,cache,gameDate){
   const data=cache?.[key];
   const gdt=gameDate?new Date(gameDate):new Date(),gms=gdt.getTime();
@@ -510,12 +608,12 @@ function getTravelFatigue(awayKey,homeKey,awayRest){
 // ── TEAM LOOKUP ───────────────────────────────────────────────────────────────
 function normalizeTeamName(n){
   if(!n)return n;
-  // "St " (no period) = State abbreviation: "Alabama St Hornets" → "Alabama State Hornets"
-  // "St." (with period) = Saint abbreviation: "St. John's" stays as-is until apostrophe strip
   return n
-    .replace(/\bSt\s/g,"State ")       // "Alabama St " → "Alabama State " (no period = State)
-    .replace(/\bSt$/,"State")           // trailing "St" (no period) → "State"
-    .replace(/\'\w*/g,"")             // remove apostrophes: "John's" → "John", "Mary's" → "Mary"
+    .replace(/\bInt'l\b/g,"International") // "Florida Int'l" → "Florida International"
+    .replace(/\s*\(OH\)/g," OH")          // "Miami (OH)" → "Miami OH"
+    .replace(/\bSt\s/g,"State ")           // "Alabama St " → "Alabama State "
+    .replace(/\bSt$/,"State")               // trailing "St" → "State"
+    .replace(/'\w*/g,"")                   // "John's" → "John", "Mary's" → "Mary"
     .replace(/\s+/g," ").trim();
 }
 function getEff(n){
@@ -538,7 +636,7 @@ function getEff(n){
     const words=n2.split(" ");
     for(let trim=1;trim<words.length;trim++){
       const candidate=words.slice(0,words.length-trim).join(" ");
-      if(candidate.length<4)break;
+      if(candidate.length<2)break;
       const found=exact(candidate);
       if(found){k=found;break;}
     }
@@ -548,7 +646,7 @@ function getEff(n){
   if(!k){
     const sorted=[...keys].sort((a,b)=>b.length-a.length);
     k=sorted.find(k2=>{
-      if(k2.length<4)return false;
+      if(k2.length<2)return false;
       const kl=k2.toLowerCase();
       const idx=lo.indexOf(kl);
       if(idx===-1)return false;
@@ -568,9 +666,10 @@ function kellySize(prob,odds,br,cap){
 function calcUnits(br){const u=br*0.02;return{unit:+u.toFixed(2),anchor:+(u*2.5).toFixed(2),core:+(u*1.5).toFixed(2),optional:+u.toFixed(2),maxDaily:+(br*0.12).toFixed(2)}}
 
 // ── GAME ANALYSIS ─────────────────────────────────────────────────────────────
-function analyzeGame(g,ml,br,espnData){
+function analyzeGame(g,ml,br,espnData,meta){
   const home=g.home_team,away=g.away_team;
   const he=getEff(home),ae=getEff(away);
+  const m=meta||{rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}};
   // Odds parsing
   let hML=null,aML=null,hSp=null,hSpO=null,aSp=null,aSpO=null,openSp=null;
   const spHist=[];
@@ -587,6 +686,22 @@ function analyzeGame(g,ml,br,espnData){
     });
   });
   const lm=(openSp!==null&&hSp!==null)?+(hSp-openSp).toFixed(1):null;
+  // Line movement flag: >=1.5pt shift = sharp money signal
+  const sharpMove=lm!==null&&Math.abs(lm)>=1.5;
+  // Neutral site / conf tourney detection via ESPN meta
+  const gkeyFwd=`${away}@${home}`;
+  const gkeyRev=`${home}@${away}`;
+  const isNeutral=!!(g.neutral_site||m.neutralGames[gkeyFwd]||m.neutralGames[gkeyRev]);
+  const isConfTourney=!!(m.confTourneyGames[gkeyFwd]||m.confTourneyGames[gkeyRev]);
+  // AP rankings
+  const hRank=m.rankings[he.name]||null;
+  const aRank=m.rankings[ae.name]||null;
+  // Injury alerts
+  const hInj=m.injuries[he.name]||[];
+  const aInj=m.injuries[ae.name]||[];
+  // W/L records
+  const hRec=m.records[he.name]||null;
+  const aRec=m.records[ae.name]||null;
   // Vig-free market prob
   const mlP=o=>o?(o<0?(-o)/(-o+100):100/(o+100)):0.5;
   const rh=mlP(hML),ra=mlP(aML),nm=rh+ra;
@@ -595,10 +710,12 @@ function analyzeGame(g,ml,br,espnData){
   const cache=espnData||{};
   const hCtx=getSchedCtx(he.name,cache,g.commence_time);
   const aCtx=getSchedCtx(ae.name,cache,g.commence_time);
-  const travel=getTravelFatigue(ae.name,he.name,aCtx.restDays);
-  // Conf tourney flag
-  const now=new Date(),mo=now.getMonth()+1,dy=now.getDate();
-  const ct=(mo===2&&dy>=20)||(mo===3&&dy<=15)?1.0:0.2;
+  // If neutral site, travel calc is symmetric — use 0 home court
+  const travel=isNeutral?{distKm:0,tzDelta:0,fatiguePenalty:0}:getTravelFatigue(ae.name,he.name,aCtx.restDays);
+  // Conf tourney flag: ESPN-detected takes precedence over date heuristic
+  const now2=new Date(),mo=now2.getMonth()+1,dy=now2.getDate();
+  const ctDate=(mo===2&&dy>=20)||(mo===3&&dy<=15)?1.0:0.2;
+  const ct=isConfTourney?1.0:ctDate;
   // Game flags
   const isMM=he.rank>50&&ae.rank>50;
   const isLF=hSp&&hSp<-10;
@@ -606,14 +723,14 @@ function analyzeGame(g,ml,br,espnData){
   const slow=Math.min(he.pace,ae.pace)<66;
   const emDiff=he.adjEM-ae.adjEM;
   const pubPen=Math.abs(emDiff+3.2)>20;
-  // Features
+  // Features — pass isNeutral so home court weight is zeroed
   const schedCtx={
     homeRestDays:hCtx.restDays,awayRestDays:aCtx.restDays,
     homeB2B:hCtx.isB2B,awayB2B:aCtx.isB2B,
     travelPenalty:travel.fatiguePenalty,
     homeFormMargin:hCtx.recentMargin,awayFormMargin:aCtx.recentMargin,
   };
-  const feats=ml.buildFeatures(he,ae,hSp,true,isMM,lm,schedCtx);
+  const feats=ml.buildFeatures(he,ae,hSp,isNeutral?false:true,isMM,lm,schedCtx);
   feats.confTourney=ct;
   const modHP=ml.predict(feats);
   const edge=modHP-mktHP,absE=Math.abs(edge);
@@ -627,6 +744,7 @@ function analyzeGame(g,ml,br,espnData){
     slowTempo:slow,defReboundEdge:Math.abs(he.defReb-ae.defReb)>3,
     midMajorEdge:isMM,valueDetected:isVal,noLargeFavorite:!isLF,
     homeMoreRested:hCtx.restDays>aCtx.restDays+1,awayB2BFlag:aCtx.isB2B,
+    sharpLineMove:sharpMove,neutralSite:isNeutral,
   };
   const cs=Object.values(cl).filter(Boolean).length;
   const conf=Math.min(94,Math.round(50+es*1.4+absE*28+cs*1.6));
@@ -634,7 +752,8 @@ function analyzeGame(g,ml,br,espnData){
   return{
     id:g.id||(home+away),home,away,he,ae,hML,aML,hSp,hSpO,aSp,aSpO,
     mktHP:(mktHP*100).toFixed(1),modHP:(modHP*100).toFixed(1),
-    edge:edge.toFixed(3),es,isVal,valSide,conf,lm,isMM,isLF,isSU,slow,pubPen,
+    edge:edge.toFixed(3),es,isVal,valSide,conf,lm,sharpMove,isMM,isLF,isSU,slow,pubPen,
+    isNeutral,isConfTourney,hRank,aRank,hInj,aInj,hRec,aRec,
     cl,cs,feats,kellyWager,commenceTime:g.commence_time,units:calcUnits(br),
     schedule:{
       homeRestDays:hCtx.restDays,awayRestDays:aCtx.restDays,
@@ -708,6 +827,9 @@ function PickCard({pick,showDetail,onPlace,bets}){
         </div>
         <div style={{display:"flex",gap:"6px",flexWrap:"wrap",justifyContent:"flex-end"}}>
           <span style={s.pill(tc.color)}>{pick.conf}% CONF</span>
+          {pick.isConfTourney&&<span style={s.pill(T.gold)}>🏆 CONF TOURN</span>}
+          {pick.isNeutral&&!pick.isConfTourney&&<span style={s.pill(T.muted)}>🏟 NEUTRAL</span>}
+          {pick.sharpMove&&<span style={s.pill(T.green)}>📈 SHARP {pick.lm>0?"+":""}{pick.lm}</span>}
           {sc.awayB2B&&<span style={s.pill(T.orange)}>B2B</span>}
           {sc.liveData&&<span style={s.pill(T.green)}>LIVE</span>}
           {sc.travelKm>800&&<span style={s.pill(T.purple)}>{sc.travelKm}km</span>}
@@ -759,7 +881,18 @@ function PickCard({pick,showDetail,onPlace,bets}){
           {[[`${pick.he.name} #${pick.he.rank}`,T.accent],[`EM:${pick.he.adjEM>0?"+":""}${pick.he.adjEM}`,parseFloat(pick.he.adjEM)>15?T.green:T.text],[`${pick.ae.name} #${pick.ae.rank}`,T.purple],[`EM:${pick.ae.adjEM>0?"+":""}${pick.ae.adjEM}`,T.text]].map(([label,color])=>(
             <span key={label} style={s.pill(color)}>{label}</span>
           ))}
+          {pick.hRank&&<span style={s.pill(T.gold)}>AP #{pick.hRank} {pick.he.name.split(" ").slice(-1)[0]}</span>}
+          {pick.aRank&&<span style={s.pill(T.gold)}>AP #{pick.aRank} {pick.ae.name.split(" ").slice(-1)[0]}</span>}
+          {pick.hRec&&<span style={s.pill(T.muted)}>{pick.he.name.split(" ").slice(-1)[0]} {pick.hRec}</span>}
+          {pick.aRec&&<span style={s.pill(T.muted)}>{pick.ae.name.split(" ").slice(-1)[0]} {pick.aRec}</span>}
         </div>
+        {(pick.hInj?.length>0||pick.aInj?.length>0)&&(
+          <div style={{background:`${T.red}0a`,border:`1px solid ${T.red}22`,borderRadius:"3px",padding:"5px 8px",marginBottom:"6px",fontSize:"9px",color:T.red,letterSpacing:"0.5px"}}>
+            ⚠ INJURY ALERT
+            {pick.hInj?.slice(0,1).map((h,i)=><div key={i} style={{color:T.orange,marginTop:"2px"}}>· {h.length>80?h.slice(0,80)+"…":h}</div>)}
+            {pick.aInj?.slice(0,1).map((h,i)=><div key={i} style={{color:T.orange,marginTop:"2px"}}>· {h.length>80?h.slice(0,80)+"…":h}</div>)}
+          </div>
+        )}
         <div style={{display:"flex",justifyContent:"space-between",fontSize:"10px",color:T.muted}}>
           <span>Spread:{fml(pick.hSp)}/{fml(pick.aSp)} · Move:{pick.lm!==null?(pick.lm>0?`+${pick.lm}`:pick.lm):"—"} · ES:{pick.es}</span>
           <span style={{color:tc.color}}>{open?"▲":"▼"}</span>
@@ -774,7 +907,7 @@ function PickCard({pick,showDetail,onPlace,bets}){
           </div>
           <div style={{marginBottom:"8px"}}>
             {Object.entries(pick.cl).map(([k,v])=>{
-              const lbls={efficiencyMismatch:"Efficiency gap >8pts",noPublicBias:"No public bias",shortUnderdog:"Short dog +1→+4",slowTempo:"Slow tempo <66",defReboundEdge:"Def reb edge",midMajorEdge:"Mid-major edge",valueDetected:"Model vs market",noLargeFavorite:"Spread ≤ 10",homeMoreRested:"Home more rested",awayB2BFlag:"Away B2B ⚠"};
+              const lbls={efficiencyMismatch:"Efficiency gap >8pts",noPublicBias:"No public bias",shortUnderdog:"Short dog +1→+4",slowTempo:"Slow tempo <66",defReboundEdge:"Def reb edge",midMajorEdge:"Mid-major edge",valueDetected:"Model vs market",noLargeFavorite:"Spread ≤ 10",homeMoreRested:"Home more rested",awayB2BFlag:"Away B2B ⚠",sharpLineMove:"Sharp line move ≥1.5",neutralSite:"Neutral site (no HCA)"};
               return<div key={k} style={{display:"flex",gap:"8px",fontSize:"11px",marginBottom:"4px",color:v?(k==="awayB2BFlag"?T.orange:T.green):T.muted}}><span>{v?"✓":"·"}</span><span>{lbls[k]||k}</span></div>;
             })}
           </div>
@@ -1012,6 +1145,8 @@ function App(){
   const mlRef=useRef(new MLModel(sg(SK.model,null)));
   const ml=mlRef.current;
   const espnRef=useRef({});
+  const metaRef=useRef({rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}});
+  const[metaStatus,setMetaStatus]=useState("loading");
 
   const DEMO=[
     {id:"d1",home_team:"Houston Cougars",away_team:"Baylor Bears",commence_time:new Date().toISOString(),bookmakers:[{key:"dk",markets:[{key:"h2h",outcomes:[{name:"Houston Cougars",price:-580},{name:"Baylor Bears",price:420}]},{key:"spreads",outcomes:[{name:"Houston Cougars",point:-9.5,price:-110},{name:"Baylor Bears",point:9.5,price:-110}]}]}]},
@@ -1021,22 +1156,26 @@ function App(){
     {id:"d5",home_team:"Memphis Tigers",away_team:"Tulane Green Wave",commence_time:new Date().toISOString(),bookmakers:[{key:"dk",markets:[{key:"h2h",outcomes:[{name:"Memphis Tigers",price:-180},{name:"Tulane Green Wave",price:148}]},{key:"spreads",outcomes:[{name:"Memphis Tigers",point:-3.5,price:-110},{name:"Tulane Green Wave",point:3.5,price:-110}]}]}]},
   ];
 
-  function loadDemo(ed){
+  function loadDemo(ed,md){
     const d=ed||espnRef.current;
-    const e=DEMO.map(g=>analyzeGame(g,ml,bankroll,d)).sort((a,b)=>b.conf-a.conf);
+    const m=md||metaRef.current;
+    const e=DEMO.map(g=>analyzeGame(g,ml,bankroll,d,m)).sort((a,b)=>b.conf-a.conf);
     setAnalyzed(e);setCard(buildCard(e,bankroll));
   }
 
-  // ESPN fetch on mount
+  // ESPN fetch on mount — schedule cache + meta in parallel
   useEffect(()=>{
     setEspnLoading(true);
-    buildESPNCache().then(result=>{
+    Promise.all([buildESPNCache(), fetchESPNMeta()]).then(([result, meta])=>{
       espnRef.current=result.data||{};
+      metaRef.current=meta||{rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}};
       setEspnStatus(result);
       setEspnLoading(false);
+      setMetaStatus(Object.keys(meta.rankings||{}).length>0?"live":"partial");
     }).catch(()=>{
       setEspnLoading(false);
       setEspnStatus({source:"failed",ts:0,teams:0});
+      setMetaStatus("failed");
     });
   },[]);
 
@@ -1050,9 +1189,9 @@ function App(){
       if(!res.ok)throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       setCallsLeft(res.headers.get("x-requests-remaining"));
       const data=await res.json();
-      const e=data.map(g=>analyzeGame(g,ml,bankroll,espnRef.current)).sort((a,b)=>b.conf-a.conf);
+      const e=data.map(g=>analyzeGame(g,ml,bankroll,espnRef.current,metaRef.current)).sort((a,b)=>b.conf-a.conf);
       setAnalyzed(e);setCard(buildCard(e,bankroll));setUpdated(new Date().toLocaleTimeString());
-    }catch(e){setError(e.message);loadDemo(espnRef.current);}
+    }catch(e){setError(e.message);loadDemo(espnRef.current,metaRef.current);}
     finally{setLoading(false);}
   },[proxyUrl,bankroll]);
 
@@ -1061,8 +1200,13 @@ function App(){
   function resetModel(){mlRef.current=new MLModel(null);ss(SK.model,null);setResults([]);ss(SK.results,[]);}
 
   function refreshESPN(){
-    ss(SK.espn,null);setEspnStatus({source:"loading"});setEspnLoading(true);
-    buildESPNCache().then(r=>{espnRef.current=r.data||{};setEspnStatus(r);setEspnLoading(false);});
+    ss(SK.espn,null);ss(SK.meta,null);setEspnStatus({source:"loading"});setEspnLoading(true);setMetaStatus("loading");
+    Promise.all([buildESPNCache(), fetchESPNMeta()]).then(([r, meta])=>{
+      espnRef.current=r.data||{};
+      metaRef.current=meta||{rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}};
+      setEspnStatus(r);setEspnLoading(false);
+      setMetaStatus(Object.keys(meta.rankings||{}).length>0?"live":"partial");
+    });
   }
 
   const espnTeams=Object.keys(espnRef.current||{}).length;
@@ -1100,6 +1244,8 @@ function App(){
            "ESPN OFFLINE · STATIC DATA ONLY"}
         </span>
         {(espnStatus.source==="live"||espnStatus.source==="cached")&&<span style={{color:T.muted}}>rest days · B2B · travel · rolling form active</span>}
+        {metaStatus==="live"&&<span style={{color:T.green,fontSize:"8px"}}>· AP RANKS · INJURIES · NEUTRAL SITE</span>}
+        {metaStatus==="partial"&&<span style={{color:T.gold,fontSize:"8px"}}>· PARTIAL META</span>}
         {espnStatus.source==="failed"&&<span style={{color:T.muted}}>schedule data unavailable</span>}
         <button onClick={refreshESPN} style={{marginLeft:"auto",background:"transparent",border:`1px solid ${T.border}`,color:T.muted,fontSize:"8px",padding:"2px 8px",borderRadius:"3px",cursor:"pointer",fontFamily:"inherit"}}>↺ REFRESH</button>
       </div>
