@@ -751,6 +751,7 @@ function analyzeGame(g,ml,br,espnData,meta,dmp=0.12){
   const lm=(openSp!==null&&hSp!==null)?+(hSp-openSp).toFixed(1):null;
   // Line movement flag: >=1.5pt shift = sharp money signal
   const sharpMove=lm!==null&&Math.abs(lm)>=1.5;
+
   // Neutral site / conf tourney detection via ESPN meta
   const gkeyFwd=`${away}@${home}`;
   const gkeyRev=`${home}@${away}`;
@@ -1251,7 +1252,7 @@ function App(){
   function loadDemo(ed,md){
     const d=ed||espnRef.current;
     const m=md||metaRef.current;
-    const e=DEMO.map(g=>analyzeGame(g,ml,bankroll,d,m)).sort((a,b)=>b.conf-a.conf);
+    const e=DEMO.map(g=>analyzeGame(g,ml,bankroll,d,m,dailyMaxPct)).sort((a,b)=>b.conf-a.conf);
     setAnalyzed(e);setCard(buildCard(e,bankroll,dailyMaxPct));
   }
 
@@ -1281,7 +1282,7 @@ function App(){
       if(!res.ok)throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       setCallsLeft(res.headers.get("x-requests-remaining"));
       const data=await res.json();
-      const e=data.map(g=>analyzeGame(g,ml,bankroll,espnRef.current,metaRef.current)).sort((a,b)=>b.conf-a.conf);
+      const e=data.map(g=>analyzeGame(g,ml,bankroll,espnRef.current,metaRef.current,dailyMaxPct)).sort((a,b)=>b.conf-a.conf);
       setAnalyzed(e);setCard(buildCard(e,bankroll,dailyMaxPct));setUpdated(new Date().toLocaleTimeString());
     }catch(e){setError(e.message);loadDemo(espnRef.current,metaRef.current);}
     finally{setLoading(false);}
