@@ -783,6 +783,13 @@ function analyzeGame(g,ml,br,espnData,meta,dmp=0.12){
   // Game flags
   const isMM=he.rank>50&&ae.rank>50;
   const isLF=hSp&&hSp<-10;
+  const isALF=aSp&&aSp<-10;
+  const anyLF=isLF||isALF;
+  // Trap Spread Test: fav in -7→-13 bait zone + public piling on + clear talent gap
+  const favSpVal=isLF?hSp:(isALF?aSp:null);
+  const isTrapZone=favSpVal!==null&&favSpVal>=-13&&favSpVal<=-7;
+  const mktFavPct=isLF?mktHP:(1-mktHP);
+  const trapSpread=isTrapZone&&mktFavPct>0.62&&Math.abs(emDiff)>8;
   const isSU=aSp&&aSp>0&&aSp<=4;
   const slow=Math.min(he.pace,ae.pace)<66;
   const emDiff=he.adjEM-ae.adjEM;
@@ -806,9 +813,9 @@ function analyzeGame(g,ml,br,espnData,meta,dmp=0.12){
   const cl={
     efficiencyMismatch:Math.abs(emDiff)>8,noPublicBias:!pubPen,shortUnderdog:isSU,
     slowTempo:slow,defReboundEdge:Math.abs(he.defReb-ae.defReb)>3,
-    midMajorEdge:isMM,valueDetected:isVal,noLargeFavorite:!isLF,
+    midMajorEdge:isMM,valueDetected:isVal,noLargeFavorite:!anyLF,
     homeMoreRested:hCtx.restDays>aCtx.restDays+1,awayB2BFlag:aCtx.isB2B,
-    sharpLineMove:sharpMove,neutralSite:isNeutral,
+    sharpLineMove:sharpMove,neutralSite:isNeutral,trapSpreadAlert:trapSpread,
   };
   const cs=Object.values(cl).filter(Boolean).length;
   const conf=Math.min(94,Math.round(50+es*1.4+absE*28+cs*1.6));
@@ -816,7 +823,7 @@ function analyzeGame(g,ml,br,espnData,meta,dmp=0.12){
   return{
     id:g.id||(home+away),home,away,he,ae,hML,aML,hSp,hSpO,aSp,aSpO,
     mktHP:(mktHP*100).toFixed(1),modHP:(modHP*100).toFixed(1),
-    edge:edge.toFixed(3),es,isVal,valSide,conf,lm,sharpMove,isMM,isLF,isSU,slow,pubPen,
+    edge:edge.toFixed(3),es,isVal,valSide,conf,lm,sharpMove,isMM,isLF,isALF,anyLF,isSU,slow,pubPen,trapSpread,
     isNeutral,isConfTourney,hRank,aRank,hInj,aInj,hRec,aRec,
     cl,cs,feats,kellyWager,commenceTime:g.commence_time,units:calcUnits(br,dmp),
     schedule:{
@@ -837,7 +844,11 @@ function buildCard(analyzed,br,dmp=0.12){
   const units=calcUnits(br,dmp);
   const elig=analyzed
     .filter(a=>{
-      if(!a.hML||!a.hSp||a.isLF||a.he.rank>=108||a.ae.rank>=108)return false;
+      if(!a.hML||!a.hSp||a.he.rank>=108||a.ae.rank>=108)return false;
+      // Never back a large favorite (>10pts); fading them as the dog is allowed
+      const pickingHomeLF=a.isLF&&a.valSide===a.home;
+      const pickingAwayLF=a.isALF&&a.valSide===a.away;
+      if(pickingHomeLF||pickingAwayLF)return false;
       const isAnchorQuality=a.conf>=TH.anchor.minConf&&a.es>=TH.anchor.minEdge;
       // Anchors bypass spread cap and public bias — elite edge/conf already prices these in
       if(isAnchorQuality)return true;
@@ -857,7 +868,7 @@ function buildCard(analyzed,br,dmp=0.12){
     picks.push({...g,tier,wager:w,rank:picks.length+1});exp+=w;
   }
   const pickIds=new Set(picks.map(p=>p.id));
-  const traps=analyzed.filter(a=>!pickIds.has(a.id)&&(a.pubPen||a.isLF||(a.cs<2&&parseFloat(a.mktHP)>75))).slice(0,3);
+  const traps=analyzed.filter(a=>!pickIds.has(a.id)&&(a.pubPen||a.anyLF||(a.cs<2&&parseFloat(a.mktHP)>75))).slice(0,3);
   return{picks,traps,exp:exp.toFixed(2),units,anchorCount:ac,coreCount:cc,optCount:oc};
 }
 
@@ -973,8 +984,8 @@ function PickCard({pick,showDetail,onPlace,bets}){
           </div>
           <div style={{marginBottom:"8px"}}>
             {Object.entries(pick.cl).map(([k,v])=>{
-              const lbls={efficiencyMismatch:"Efficiency gap >8pts",noPublicBias:"No public bias",shortUnderdog:"Short dog +1→+4",slowTempo:"Slow tempo <66",defReboundEdge:"Def reb edge",midMajorEdge:"Mid-major edge",valueDetected:"Model vs market",noLargeFavorite:"Spread ≤ 10",homeMoreRested:"Home more rested",awayB2BFlag:"Away B2B ⚠",sharpLineMove:"Sharp line move ≥1.5",neutralSite:"Neutral site (no HCA)"};
-              return<div key={k} style={{display:"flex",gap:"8px",fontSize:"11px",marginBottom:"4px",color:v?(k==="awayB2BFlag"?T.orange:T.green):T.muted}}><span>{v?"✓":"·"}</span><span>{lbls[k]||k}</span></div>;
+              const lbls={efficiencyMismatch:"Efficiency gap >8pts",noPublicBias:"No public bias",shortUnderdog:"Short dog +1→+4",slowTempo:"Slow tempo <66",defReboundEdge:"Def reb edge",midMajorEdge:"Mid-major edge",valueDetected:"Model vs market",noLargeFavorite:"Spread ≤ 10",homeMoreRested:"Home more rested",awayB2BFlag:"Away B2B ⚠",sharpLineMove:"Sharp line move ≥1.5",neutralSite:"Neutral site (no HCA)",trapSpreadAlert:"⚠ Trap zone (-7→-13)"};
+              return<div key={k} style={{display:"flex",gap:"8px",fontSize:"11px",marginBottom:"4px",color:v?(k==="awayB2BFlag"||k==="trapSpreadAlert"?T.orange:T.green):T.muted}}><span>{v?"✓":"·"}</span><span>{lbls[k]||k}</span></div>;
             })}
           </div>
           <div style={{padding:"6px 8px",background:T.surface,borderRadius:"4px",fontSize:"10px",color:T.muted}}>
