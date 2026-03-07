@@ -33,7 +33,7 @@ const {useState,useEffect,useCallback,useRef}=React;
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 const SPORT="basketball_ncaab",REGIONS="us",MARKETS="h2h,spreads",BOOKMAKERS="draftkings,fanduel,betmgm,caesars";
-const SK={model:"ncaamb_ml_v5",bets:"ncaamb_bets_v5",bankroll:"ncaamb_br_v5",results:"ncaamb_res_v5",proxy:"ncaamb_proxy_v5",espn:"ncaamb_espn_v3",meta:"ncaamb_meta_v1"};
+const SK={model:"ncaamb_ml_v5",bets:"ncaamb_bets_v5",bankroll:"ncaamb_br_v5",results:"ncaamb_res_v5",proxy:"ncaamb_proxy_v5",espn:"ncaamb_espn_v3",meta:"ncaamb_meta_v1",dmp:"ncaamb_dmp_v1"};
 const T={bg:"#07090f",surface:"#0c1018",card:"#10161f",border:"#18243a",accent:"#00e5ff",green:"#00e676",red:"#ff3d57",gold:"#ffd600",purple:"#b388ff",orange:"#ff9100",text:"#dce8f8",muted:"#4a5a7a"};
 const ESPN_BASE="https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball";
 const ESPN_TTL=4*3600*1000;
@@ -127,6 +127,7 @@ const TE={
   "Gonzaga":{rank:16,adjEM:21.4,adjO:119.8,adjD:98.4,pace:71.8,defReb:71.2,toRate:14.2,efg:55.4},
   "Baylor":{rank:17,adjEM:20.2,adjO:115.4,adjD:95.2,pace:69.8,defReb:73.8,toRate:15.1,efg:52.8},
   "Saint Louis":{rank:18,adjEM:19.8,adjO:113.4,adjD:93.6,pace:66.8,defReb:75.4,toRate:13.8,efg:51.8},
+  "St. Bonaventure":{rank:63,adjEM:6.2,adjO:106.4,adjD:100.2,pace:67.8,defReb:71.4,toRate:16.2,efg:50.8},
   "Mississippi State":{rank:19,adjEM:19.4,adjO:113.8,adjD:94.4,pace:67.4,defReb:74.2,toRate:15.6,efg:52.2},
   "Ole Miss":{rank:20,adjEM:18.8,adjO:114.2,adjD:95.4,pace:68.8,defReb:73.1,toRate:16.2,efg:52.6},
   "New Mexico":{rank:21,adjEM:18.4,adjO:114.8,adjD:96.4,pace:70.2,defReb:72.8,toRate:15.4,efg:53.1},
@@ -418,7 +419,7 @@ const AD={
   "Louisville":{lat:38.22,lon:-85.76,tz:-5},"Utah State":{lat:41.76,lon:-111.81,tz:-7},
   "Boise State":{lat:43.60,lon:-116.20,tz:-7},"Providence":{lat:41.82,lon:-71.40,tz:-5},
   "Notre Dame":{lat:41.70,lon:-86.24,tz:-5},"Wake Forest":{lat:36.13,lon:-80.28,tz:-5},
-  "Nebraska":{lat:40.82,lon:-96.70,tz:-6},"Pittsburgh":{lat:40.44,lon:-80.00,tz:-5},
+  "Nebraska":{lat:40.82,lon:-96.70,tz:-6},"Pittsburgh":{lat:40.44,lon:-80.00,tz:-5},"St. Bonaventure":{lat:42.08,lon:-78.47,tz:-5},
   "Indiana":{lat:39.17,lon:-86.52,tz:-5},"Penn State":{lat:40.80,lon:-77.86,tz:-5},
   "Colorado State":{lat:40.58,lon:-105.09,tz:-7},"Drake":{lat:41.60,lon:-93.65,tz:-6},
   "UAB":{lat:33.50,lon:-86.80,tz:-6},"South Florida":{lat:28.07,lon:-82.42,tz:-5},
@@ -649,6 +650,7 @@ const ACRONYM_ALIASES={
   // St. Joseph's → Saint Joseph
   "St. Joseph":"Saint Joseph",
   "Saint Joseph's":"Saint Joseph",
+  "Saint Bonaventure":"St. Bonaventure",
   // Stephen F. Austin
   "Stephen F. Austin":"Stephen F Austin",
   // UT Martin / Tennessee-Martin
@@ -724,10 +726,10 @@ function kellySize(prob,odds,br,cap){
   const b=odds>0?odds/100:100/Math.abs(odds),p=Math.min(0.95,Math.max(0.05,prob)),q=1-p;
   return +(Math.min(Math.max(0,(b*p-q)/b*0.25),cap||0.05)*br).toFixed(2);
 }
-function calcUnits(br){const u=br*0.02;return{unit:+u.toFixed(2),anchor:+(u*2.5).toFixed(2),core:+(u*1.5).toFixed(2),optional:+u.toFixed(2),maxDaily:+(br*0.12).toFixed(2)}}
+function calcUnits(br,dmp=0.12){const u=br*0.02;return{unit:+u.toFixed(2),anchor:+(u*2.5).toFixed(2),core:+(u*1.5).toFixed(2),optional:+u.toFixed(2),maxDaily:+(br*dmp).toFixed(2),dmp}}
 
 // ── GAME ANALYSIS ─────────────────────────────────────────────────────────────
-function analyzeGame(g,ml,br,espnData,meta){
+function analyzeGame(g,ml,br,espnData,meta,dmp=0.12){
   const home=g.home_team,away=g.away_team;
   const he=getEff(home),ae=getEff(away);
   const m=meta||{rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}};
@@ -815,7 +817,7 @@ function analyzeGame(g,ml,br,espnData,meta){
     mktHP:(mktHP*100).toFixed(1),modHP:(modHP*100).toFixed(1),
     edge:edge.toFixed(3),es,isVal,valSide,conf,lm,sharpMove,isMM,isLF,isSU,slow,pubPen,
     isNeutral,isConfTourney,hRank,aRank,hInj,aInj,hRec,aRec,
-    cl,cs,feats,kellyWager,commenceTime:g.commence_time,units:calcUnits(br),
+    cl,cs,feats,kellyWager,commenceTime:g.commence_time,units:calcUnits(br,dmp),
     schedule:{
       homeRestDays:hCtx.restDays,awayRestDays:aCtx.restDays,
       homeB2B:hCtx.isB2B,awayB2B:aCtx.isB2B,
@@ -829,9 +831,9 @@ function analyzeGame(g,ml,br,espnData,meta){
 }
 
 // ── CARD BUILDER ──────────────────────────────────────────────────────────────
-const TH={anchor:{minConf:85,minEdge:18,max:1},core:{minConf:75,minEdge:10,max:2},optional:{minConf:68,minEdge:6,max:2}};
-function buildCard(analyzed,br){
-  const units=calcUnits(br);
+const TH={anchor:{minConf:85,minEdge:18},core:{minConf:75,minEdge:10},optional:{minConf:68,minEdge:6}};
+function buildCard(analyzed,br,dmp=0.12){
+  const units=calcUnits(br,dmp);
   const elig=analyzed
     .filter(a=>{
       if(!a.hML||!a.hSp||a.isLF||a.he.rank>=108||a.ae.rank>=108)return false;
@@ -843,13 +845,14 @@ function buildCard(analyzed,br){
     .sort((a,b)=>b.conf-a.conf);
   const picks=[];let exp=0,ac=0,cc=0,oc=0;
   for(const g of elig){
-    if(picks.length>=5||exp>=units.maxDaily)break;
+    // Daily max exposure is the only hard limit — no artificial tier caps
+    if(exp>=units.maxDaily)break;
     let tier=null,w=0;
-    if(g.conf>=TH.anchor.minConf&&g.es>=TH.anchor.minEdge&&ac<TH.anchor.max){tier="anchor";w=units.anchor;ac++;}
-    else if(g.conf>=TH.core.minConf&&g.es>=TH.core.minEdge&&cc<TH.core.max){tier="core";w=units.core;cc++;}
-    else if(g.conf>=TH.optional.minConf&&g.es>=TH.optional.minEdge&&oc<TH.optional.max){tier="optional";w=units.optional;oc++;}
+    if(g.conf>=TH.anchor.minConf&&g.es>=TH.anchor.minEdge){tier="anchor";w=units.anchor;ac++;}
+    else if(g.conf>=TH.core.minConf&&g.es>=TH.core.minEdge){tier="core";w=units.core;cc++;}
+    else if(g.conf>=TH.optional.minConf&&g.es>=TH.optional.minEdge){tier="optional";w=units.optional;oc++;}
     else continue;
-    if(exp+w>units.maxDaily)continue;
+    if(exp+w>units.maxDaily){w=+(units.maxDaily-exp).toFixed(2);if(w<0.5)break;} // partial fill last slot
     picks.push({...g,tier,wager:w,rank:picks.length+1});exp+=w;
   }
   const pickIds=new Set(picks.map(p=>p.id));
@@ -983,11 +986,11 @@ function PickCard({pick,showDetail,onPlace,bets}){
 }
 
 // ── BANKROLL TAB ──────────────────────────────────────────────────────────────
-function BankrollTab({bets,setBets,bankroll,setBankroll,ml,setResults,results}){
+function BankrollTab({bets,setBets,bankroll,setBankroll,ml,setResults,results,dailyMaxPct,setDailyMaxPct}){
   const[form,setForm]=useState({game:"",pick:"",type:"Spread",wager:"",odds:"-110"});
   const[editBR,setEditBR]=useState(false);
   const[brIn,setBrIn]=useState("");
-  const u=calcUnits(bankroll);
+  const u=calcUnits(bankroll,dailyMaxPct);
   const won=bets.filter(b=>b.result==="win").reduce((s,b)=>s+b.profit,0);
   const lost=bets.filter(b=>b.result==="loss").reduce((s,b)=>s+b.wager,0);
   const pending=bets.filter(b=>!b.result).reduce((s,b)=>s+b.wager,0);
@@ -1053,9 +1056,35 @@ function BankrollTab({bets,setBets,bankroll,setBankroll,ml,setResults,results}){
         </div>
         <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"14px",marginBottom:"12px"}}>
           <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"8px"}}>UNITS (2% BASE)</div>
-          {[["⭐ Anchor 2.5u",u.anchor,T.gold],["💰 Core 1.5u",u.core,T.green],["🎯 Optional 1u",u.optional,T.purple],["Max Daily 12%",u.maxDaily,T.red]].map(([l,v,c])=>(
-            <div key={l} style={{display:"flex",justifyContent:"space-between",fontSize:"11px",marginBottom:"5px"}}><span style={{color:T.muted}}>{l}</span><span style={{color:c,fontWeight:"700"}}>${v}</span></div>
+          {[["⭐ Anchor 2.5u",u.anchor,T.gold],["💰 Core 1.5u",u.core,T.green],["🎯 Optional 1u",u.optional,T.purple],[`Max Daily ${Math.round(dailyMaxPct*100)}%`,u.maxDaily,T.red]].map(([l,v,c])=>(
+            <div key={l} style={{background:`${c}10`,border:`1px solid ${c}30`,borderRadius:"4px",padding:"8px 10px",textAlign:"center"}}>
+              <div style={{fontSize:"8px",color:c,letterSpacing:"1.5px",marginBottom:"2px"}}>{l}</div>
+              <div style={{fontSize:"16px",fontWeight:"700",color:c}}>${v}</div>
+            </div>
           ))}
+          </div>
+          {/* Daily Max Exposure Slider */}
+          <div style={{background:"#0c1018",border:`1px solid ${T.border}`,borderRadius:"6px",padding:"12px 14px",marginBottom:"14px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px"}}>
+              <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px"}}>DAILY MAX EXPOSURE</div>
+              <div style={{fontSize:"14px",fontWeight:"700",color:T.red}}>{Math.round(dailyMaxPct*100)}% · ${u.maxDaily}</div>
+            </div>
+            <input type="range" min="5" max="40" step="1" value={Math.round(dailyMaxPct*100)}
+              onChange={e=>{const v=parseInt(e.target.value)/100;setDailyMaxPct(v);ss(SK.dmp,v);}}
+              style={{width:"100%",accentColor:T.red,marginBottom:"10px"}}/>
+            <div style={{display:"flex",gap:"6px"}}>
+              {[[12,"Conservative"],[20,"Moderate"],[25,"Aggressive"],[33,"Max Growth"]].map(([pct,lbl])=>(
+                <button key={pct} onClick={()=>{const v=pct/100;setDailyMaxPct(v);ss(SK.dmp,v);}}
+                  style={{flex:1,background:Math.round(dailyMaxPct*100)===pct?T.red+"30":"transparent",border:`1px solid ${Math.round(dailyMaxPct*100)===pct?T.red:T.border}`,color:Math.round(dailyMaxPct*100)===pct?T.red:T.muted,fontSize:"8px",padding:"5px 2px",borderRadius:"3px",cursor:"pointer",fontFamily:"inherit",letterSpacing:"0.5px"}}>
+                  {pct}%<br/><span style={{fontSize:"7px",opacity:0.7}}>{lbl}</span>
+                </button>
+              ))}
+            </div>
+            <div style={{fontSize:"8px",color:T.muted,marginTop:"8px",lineHeight:"1.5"}}>
+              At {Math.round(dailyMaxPct*100)}% · {Math.floor(u.maxDaily/u.anchor)} anchors or {Math.floor(u.maxDaily/u.core)} core bets fit before daily cap. Kelly governs unit size automatically as bankroll grows.
+            </div>
+          </div>
+          <div style={{display:"none"}}>
         </div>
         <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"14px",marginBottom:"12px"}}>
           <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"8px"}}>SCENARIOS</div>
@@ -1202,6 +1231,7 @@ function App(){
   const[proxyUrl,setProxyUrl]=useState(()=>sg(SK.proxy,""));
   const[proxyInput,setProxyInput]=useState(()=>sg(SK.proxy,""));
   const[bankroll,setBankroll]=useState(()=>sg(SK.bankroll,300));
+  const[dailyMaxPct,setDailyMaxPct]=useState(()=>sg(SK.dmp,0.12));
   const[bets,setBets]=useState(()=>sg(SK.bets,[]));
   const[results,setResults]=useState(()=>sg(SK.results,[]));
   const mlRef=useRef(new MLModel(sg(SK.model,null)));
@@ -1222,7 +1252,7 @@ function App(){
     const d=ed||espnRef.current;
     const m=md||metaRef.current;
     const e=DEMO.map(g=>analyzeGame(g,ml,bankroll,d,m)).sort((a,b)=>b.conf-a.conf);
-    setAnalyzed(e);setCard(buildCard(e,bankroll));
+    setAnalyzed(e);setCard(buildCard(e,bankroll,dailyMaxPct));
   }
 
   // ESPN fetch on mount — schedule cache + meta in parallel
@@ -1252,10 +1282,10 @@ function App(){
       setCallsLeft(res.headers.get("x-requests-remaining"));
       const data=await res.json();
       const e=data.map(g=>analyzeGame(g,ml,bankroll,espnRef.current,metaRef.current)).sort((a,b)=>b.conf-a.conf);
-      setAnalyzed(e);setCard(buildCard(e,bankroll));setUpdated(new Date().toLocaleTimeString());
+      setAnalyzed(e);setCard(buildCard(e,bankroll,dailyMaxPct));setUpdated(new Date().toLocaleTimeString());
     }catch(e){setError(e.message);loadDemo(espnRef.current,metaRef.current);}
     finally{setLoading(false);}
-  },[proxyUrl,bankroll]);
+  },[proxyUrl,bankroll,dailyMaxPct]);
 
   useEffect(()=>{proxyUrl?fetchOdds():loadDemo();},[]);
 
@@ -1382,14 +1412,14 @@ function App(){
           <div>
             <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"14px"}}>ALL GAMES — TAP TO EXPAND</div>
             {analyzed.map((a,i)=>{
-              const u=calcUnits(bankroll),tier=a.conf>=TH.anchor.minConf&&a.es>=TH.anchor.minEdge?"anchor":a.conf>=TH.core.minConf&&a.es>=TH.core.minEdge?"core":"optional";
+              const u=calcUnits(bankroll,dailyMaxPct),tier=a.conf>=TH.anchor.minConf&&a.es>=TH.anchor.minEdge?"anchor":a.conf>=TH.core.minConf&&a.es>=TH.core.minEdge?"core":"optional";
               const wager=tier==="anchor"?u.anchor:tier==="core"?u.core:u.optional;
               return <PickCard key={a.id} pick={{...a,tier,wager,rank:i+1}}/>;
             })}
           </div>
         )}
 
-        {tab==="bankroll"&&<BankrollTab bets={bets} setBets={setBets} bankroll={bankroll} setBankroll={setBankroll} ml={ml} setResults={setResults} results={results}/>}
+        {tab==="bankroll"&&<BankrollTab bets={bets} setBets={setBets} bankroll={bankroll} setBankroll={setBankroll} ml={ml} setResults={setResults} results={results} dailyMaxPct={dailyMaxPct} setDailyMaxPct={setDailyMaxPct}/>}
         {tab==="ml"&&<MLTab model={ml} results={results} onReset={resetModel}/>}
       </div>
 
