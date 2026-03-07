@@ -606,9 +606,71 @@ function getTravelFatigue(awayKey,homeKey,awayRest){
 }
 
 // ── TEAM LOOKUP ───────────────────────────────────────────────────────────────
+// Acronym aliases: Odds API full name → DB key
+const ACRONYM_ALIASES={
+  // UCF
+  "Central Florida":"UCF",
+  // FIU / FAU
+  "FIU":"Florida International",
+  "FAU":"Florida Atlantic",
+  // VCU
+  "UAB":"UAB",
+  "Virginia Commonwealth":"VCU",
+  // Louisiana schools
+  "Louisiana":"Louisiana",
+  "Louisiana Ragin Cajuns":"Louisiana",
+  "Louisiana Ragin' Cajuns":"Louisiana",
+  "UL Lafayette":"Louisiana",
+  "UL Monroe":"Louisiana Monroe",
+  "Louisiana-Monroe":"Louisiana Monroe",
+  // Loyola Marymount
+  "LMU":"Loyola Marymount",
+  // Cal State
+  "CSUN":"Cal State Northridge",
+  "CS Fullerton":"Cal State Fullerton",
+  // SIU Edwardsville
+  "Southern Illinois Edwardsville":"SIUE",
+  "SIU Edwardsville":"SIUE",
+  // ETSU
+  "East Tennessee State":"ETSU",
+  // Houston Baptist (now Houston Christian)
+  "Houston Christian":"Houston Baptist",
+  // Ole Miss
+  "Mississippi":"Ole Miss",
+  // UMass
+  "UMass":"Massachusetts",
+  "Massachusetts Minutemen":"Massachusetts",
+  // NC State
+  "North Carolina State":"NC State",
+  // Miami OH
+  "Miami Ohio":"Miami OH",
+  "Miami (OH)":"Miami OH",
+  // Maryland-Eastern Shore
+  "Maryland Eastern Shore":"Maryland-Eastern Shore",
+  // Bethune-Cookman (DB has hyphen, ESPN sometimes omits)
+  "Bethune Cookman":"Bethune-Cookman",
+  // St. Joseph's → Saint Joseph
+  "St. Joseph":"Saint Joseph",
+  "Saint Joseph's":"Saint Joseph",
+  // Stephen F. Austin
+  "Stephen F. Austin":"Stephen F Austin",
+  // UT Martin / Tennessee-Martin
+  "UT Martin":"Tennessee Martin",
+  "Tennessee Martin":"Tennessee Martin",
+  "Tennessee-Martin":"Tennessee Martin",
+  // UNCW
+  "UNC Wilmington":"UNCW",
+  "North Carolina Wilmington":"UNCW",
+  // Arkansas schools
+  "Arkansas Little Rock":"Arkansas Little Rock",
+  "Arkansas Pine Bluff":"Arkansas Pine Bluff",
+};
 function normalizeTeamName(n){
   if(!n)return n;
+  // First check acronym alias table (before any other transforms)
+  if(ACRONYM_ALIASES[n])return ACRONYM_ALIASES[n];
   return n
+    .replace(/-/g," ")                      // "Arkansas-Pine Bluff" → "Arkansas Pine Bluff"
     .replace(/\bInt'l\b/g,"International") // "Florida Int'l" → "Florida International"
     .replace(/\s*\(OH\)/g," OH")          // "Miami (OH)" → "Miami OH"
     .replace(/\bSt\s/g,"State ")           // "Alabama St " → "Alabama State "
@@ -637,6 +699,9 @@ function getEff(n){
     for(let trim=1;trim<words.length;trim++){
       const candidate=words.slice(0,words.length-trim).join(" ");
       if(candidate.length<2)break;
+      // Also resolve through acronym alias table during strip
+      const aliased=ACRONYM_ALIASES[candidate];
+      if(aliased&&TE[aliased]){k=aliased;break;}
       const found=exact(candidate);
       if(found){k=found;break;}
     }
@@ -810,10 +875,11 @@ const ft=iso=>{try{return new Date(iso).toLocaleTimeString([],{hour:"2-digit",mi
 function PickCard({pick,showDetail,onPlace,bets}){
   const[open,setOpen]=useState(!!showDetail);
   const tc=TIER[pick.tier||"optional"];
-  const recSide=pick.valSide;
-  const recSp=recSide===pick.home?pick.hSp:pick.aSp;
-  const recSpO=recSide===pick.home?pick.hSpO:pick.aSpO;
-  const gameKey=`${pick.away} @ ${pick.home}`;
+  const recIsHome=pick.valSide===pick.home;
+  const recSide=recIsHome?pick.he.name:pick.ae.name;
+  const recSp=recIsHome?pick.hSp:pick.aSp;
+  const recSpO=recIsHome?pick.hSpO:pick.aSpO;
+  const gameKey=`${pick.ae.name} @ ${pick.he.name}`;
   const existingBet=bets?.find(b=>b.game===gameKey&&!b.result);
   const isSettled=bets?.some(b=>b.game===gameKey&&b.result);
   const sc=pick.schedule||{};
@@ -822,8 +888,8 @@ function PickCard({pick,showDetail,onPlace,bets}){
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"8px"}}>
         <div>
           <div style={{fontSize:"9px",color:tc.color,fontWeight:"700",letterSpacing:"1.5px",marginBottom:"4px"}}>{tc.icon} {tc.label}</div>
-          <div style={{fontSize:"13px",fontWeight:"700",color:T.text}}>{pick.away.split(" ").slice(-1)[0]} <span style={{color:T.muted}}>@</span> {pick.home.split(" ").slice(-1)[0]}</div>
-          <div style={{fontSize:"9px",color:T.muted,marginTop:"2px"}}>{pick.away} · {ft(pick.commenceTime)}</div>
+          <div style={{fontSize:"13px",fontWeight:"700",color:T.text}}>{pick.ae.name} <span style={{color:T.muted}}>@</span> {pick.he.name}</div>
+          <div style={{fontSize:"9px",color:T.muted,marginTop:"2px"}}>{pick.ae.name} @ {pick.he.name} · {ft(pick.commenceTime)}</div>
         </div>
         <div style={{display:"flex",gap:"6px",flexWrap:"wrap",justifyContent:"flex-end"}}>
           <span style={s.pill(tc.color)}>{pick.conf}% CONF</span>
@@ -881,10 +947,10 @@ function PickCard({pick,showDetail,onPlace,bets}){
           {[[`${pick.he.name} #${pick.he.rank}`,T.accent],[`EM:${pick.he.adjEM>0?"+":""}${pick.he.adjEM}`,parseFloat(pick.he.adjEM)>15?T.green:T.text],[`${pick.ae.name} #${pick.ae.rank}`,T.purple],[`EM:${pick.ae.adjEM>0?"+":""}${pick.ae.adjEM}`,T.text]].map(([label,color])=>(
             <span key={label} style={s.pill(color)}>{label}</span>
           ))}
-          {pick.hRank&&<span style={s.pill(T.gold)}>AP #{pick.hRank} {pick.he.name.split(" ").slice(-1)[0]}</span>}
-          {pick.aRank&&<span style={s.pill(T.gold)}>AP #{pick.aRank} {pick.ae.name.split(" ").slice(-1)[0]}</span>}
-          {pick.hRec&&<span style={s.pill(T.muted)}>{pick.he.name.split(" ").slice(-1)[0]} {pick.hRec}</span>}
-          {pick.aRec&&<span style={s.pill(T.muted)}>{pick.ae.name.split(" ").slice(-1)[0]} {pick.aRec}</span>}
+          {pick.hRank&&<span style={s.pill(T.gold)}>AP #{pick.hRank} {pick.he.name}</span>}
+          {pick.aRank&&<span style={s.pill(T.gold)}>AP #{pick.aRank} {pick.ae.name}</span>}
+          {pick.hRec&&<span style={s.pill(T.muted)}>{pick.he.name} {pick.hRec}</span>}
+          {pick.aRec&&<span style={s.pill(T.muted)}>{pick.ae.name} {pick.aRec}</span>}
         </div>
         {(pick.hInj?.length>0||pick.aInj?.length>0)&&(
           <div style={{background:`${T.red}0a`,border:`1px solid ${T.red}22`,borderRadius:"3px",padding:"5px 8px",marginBottom:"6px",fontSize:"9px",color:T.red,letterSpacing:"0.5px"}}>
@@ -1292,7 +1358,7 @@ function App(){
                   <div style={{fontSize:"9px",color:T.red,letterSpacing:"2px",marginBottom:"10px"}}>🚫 AVOID — TRAPS</div>
                   {card.traps.map((g,i)=>(
                     <div key={i} style={{padding:"7px 10px",background:`${T.red}08`,border:`1px solid ${T.red}22`,borderRadius:"4px",marginBottom:"6px"}}>
-                      <div style={{fontSize:"11px",fontWeight:"700",color:T.text,marginBottom:"2px"}}>{g.away.split(" ").slice(-1)[0]} @ {g.home.split(" ").slice(-1)[0]}</div>
+                      <div style={{fontSize:"11px",fontWeight:"700",color:T.text,marginBottom:"2px"}}>{g.ae.name} @ {g.he.name}</div>
                       <div style={{fontSize:"10px",color:T.muted}}>Spread:{fml(g.hSp)} · {g.pubPen?"Public bias":"Large fav"}</div>
                     </div>
                   ))}
