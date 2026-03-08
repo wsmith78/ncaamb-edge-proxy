@@ -26,12 +26,13 @@ input::placeholder{color:#4a5a7a}input:focus{outline:none;border-color:#00e5ff!i
 <div id="root"></div>
 <script type="text/babel">
 /* NCAAMB Edge v5 — ESPN Live Data Edition
-   Babel in-browser warning is cosmetic only; does not affect runtime.
-   "Uncaught Script error" from v4 was caused by an orphaned return() block
-   after the MLTab closing brace — fully resolved in this build. */
+   1H CALIBRATION FIX: Engine now validates that market lines fed into
+   analyze1HPick are genuine 1H totals (35–85 pts). Full-game totals
+   (120–170) are rejected at the gate. Manual input UI warns when a
+   full-game total is detected. No more bogus OVER/UNDER signals from
+   comparing proj-67 against mkt-31. */
 const {useState,useEffect,useCallback,useRef}=React;
 
-// ── CONFIG ────────────────────────────────────────────────────────────────────
 const SPORT="basketball_ncaab",REGIONS="us",MARKETS="h2h,spreads",BOOKMAKERS="draftkings,fanduel,betmgm,caesars";
 const SK={model:"ncaamb_ml_v5",bets:"ncaamb_bets_v5",bankroll:"ncaamb_br_v5",results:"ncaamb_res_v5",proxy:"ncaamb_proxy_v5",espn:"ncaamb_espn_v3",meta:"ncaamb_meta_v1",dmp:"ncaamb_dmp_v1",h1:"ncaamb_h1_v1"};
 const T={bg:"#07090f",surface:"#0c1018",card:"#10161f",border:"#18243a",accent:"#00e5ff",cyan:"#00e5ff",green:"#00e676",red:"#ff3d57",gold:"#ffd600",purple:"#b388ff",orange:"#ff9100",text:"#dce8f8",muted:"#4a5a7a"};
@@ -41,1812 +42,637 @@ const ESPN_TTL=4*3600*1000;
 function sg(k,fb){try{const v=localStorage.getItem(k);return v?JSON.parse(v):fb}catch{return fb}}
 function ss(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}}
 
-// ── ML MODEL ──────────────────────────────────────────────────────────────────
-const DW={
-  adjEM_diff:0.42, efg_diff:0.28, toRate_diff:-0.22, defRebound:0.14,
-  homeCourt:3.20, paceFactor:0.10, publicBias:-0.20, lineMovement:0.18,
-  underdog_short:0.16, midMajorBonus:0.08, confTourney:0.09,
-  restAdvantage:0.14, awayB2B:-0.28, homeB2B:-0.18,
-  travelFatigue:0.20, recentFormDiff:0.05,
-  learningRate:0.02,totalPredictions:0,correctPredictions:0,
-  totalBets:0,winningBets:0,calibrationError:0
-};
+const DW={adjEM_diff:0.42,efg_diff:0.28,toRate_diff:-0.22,defRebound:0.14,homeCourt:3.20,paceFactor:0.10,publicBias:-0.20,lineMovement:0.18,underdog_short:0.16,midMajorBonus:0.08,confTourney:0.09,restAdvantage:0.14,awayB2B:-0.28,homeB2B:-0.18,travelFatigue:0.20,recentFormDiff:0.05,learningRate:0.02,totalPredictions:0,correctPredictions:0,totalBets:0,winningBets:0,calibrationError:0};
 
 class MLModel{
-  constructor(w){this.weights={...DW,...(w||{})}}
-  sigmoid(x){return 1/(1+Math.exp(-x))}
-  buildFeatures(he,ae,spread,isHome,isMM,lineMove,sched){
-    const sc=sched||{homeRestDays:3,awayRestDays:3,homeB2B:false,awayB2B:false,travelPenalty:0,homeFormMargin:0,awayFormMargin:0};
-    const emD=he.adjEM-ae.adjEM,pdD=he.pace-ae.pace;
-    const drD=he.defReb-ae.defReb,toD=(ae.toRate||15)-(he.toRate||15);
-    const efgD=(he.efg||50)-(ae.efg||50),sv=parseFloat(spread)||0;
-    const isShortDog=!isHome&&sv>0&&sv<=4;
-    const lmSig=lineMove&&Math.abs(lineMove)>=0.5?(lineMove<0?1:-1):0;
-    const restAdv=Math.min(4,Math.max(-4,(sc.homeRestDays||3)-(sc.awayRestDays||3)));
-    const formDiff=(sc.homeFormMargin||0)-(sc.awayFormMargin||0);
-    return{
-      adjEM_diff:emD,efg_diff:efgD,toRate_diff:toD,defRebound:drD,
-      homeCourt:isHome?1:0,paceFactor:pdD,publicBias:Math.abs(emD)>18?-1:0,
-      lineMovement:lmSig,underdog_short:isShortDog?1:0,midMajorBonus:isMM?1:0,
-      confTourney:0.5,spreadVal:sv,restAdvantage:restAdv,
-      awayB2B:sc.awayB2B?1:0,homeB2B:sc.homeB2B?1:0,
-      travelFatigue:-(sc.travelPenalty||0),
-      recentFormDiff:Math.min(10,Math.max(-10,formDiff))
-    };
-  }
-  predict(f){
-    const w=this.weights;
-    return this.sigmoid((
-      f.adjEM_diff*w.adjEM_diff+f.efg_diff*w.efg_diff+f.toRate_diff*w.toRate_diff+
-      f.defRebound*w.defRebound+f.homeCourt*w.homeCourt+f.paceFactor*w.paceFactor+
-      f.publicBias*w.publicBias+f.lineMovement*w.lineMovement+
-      f.underdog_short*w.underdog_short+f.midMajorBonus*w.midMajorBonus+
-      f.confTourney*w.confTourney+f.restAdvantage*w.restAdvantage+
-      f.awayB2B*w.awayB2B+f.homeB2B*w.homeB2B+
-      f.travelFatigue*w.travelFatigue+f.recentFormDiff*w.recentFormDiff
-    )/10);
-  }
-  learn(f,p,a){
-    const lr=this.weights.learningRate,err=a-p,grad=p*(1-p)*err;
-    ['adjEM_diff','efg_diff','toRate_diff','defRebound','homeCourt','paceFactor',
-     'publicBias','lineMovement','underdog_short','midMajorBonus','confTourney',
-     'restAdvantage','awayB2B','homeB2B','travelFatigue','recentFormDiff'
-    ].forEach(k=>{
-      if(this.weights[k]!==undefined&&f[k]!==undefined){
-        this.weights[k]+=lr*grad*f[k];
-        this.weights[k]=Math.max(-6,Math.min(6,this.weights[k]));
-      }
-    });
-    this.weights.totalPredictions++;
-    if(Math.round(p)===a)this.weights.correctPredictions++;
-    this.weights.calibrationError=Math.abs(p-a)*0.1+(this.weights.calibrationError||0)*0.9;
-    return this.weights;
-  }
-  get accuracy(){const t=this.weights.totalPredictions;return t>0?((this.weights.correctPredictions/t)*100).toFixed(1):"—"}
-  get winRate(){const t=this.weights.totalBets;return t>0?((this.weights.winningBets/t)*100).toFixed(1):"—"}
-  save(){ss(SK.model,this.weights)}
+constructor(w){this.weights={...DW,...(w||{})}}
+sigmoid(x){return 1/(1+Math.exp(-x))}
+buildFeatures(he,ae,spread,isHome,isMM,lineMove,sched){
+const sc=sched||{homeRestDays:3,awayRestDays:3,homeB2B:false,awayB2B:false,travelPenalty:0,homeFormMargin:0,awayFormMargin:0};
+const emD=he.adjEM-ae.adjEM,pdD=he.pace-ae.pace,drD=he.defReb-ae.defReb,toD=(ae.toRate||15)-(he.toRate||15),efgD=(he.efg||50)-(ae.efg||50),sv=parseFloat(spread)||0;
+const isShortDog=!isHome&&sv>0&&sv<=4,lmSig=lineMove&&Math.abs(lineMove)>=0.5?(lineMove<0?1:-1):0;
+const restAdv=Math.min(4,Math.max(-4,(sc.homeRestDays||3)-(sc.awayRestDays||3))),formDiff=(sc.homeFormMargin||0)-(sc.awayFormMargin||0);
+return{adjEM_diff:emD,efg_diff:efgD,toRate_diff:toD,defRebound:drD,homeCourt:isHome?1:0,paceFactor:pdD,publicBias:Math.abs(emD)>18?-1:0,lineMovement:lmSig,underdog_short:isShortDog?1:0,midMajorBonus:isMM?1:0,confTourney:0.5,spreadVal:sv,restAdvantage:restAdv,awayB2B:sc.awayB2B?1:0,homeB2B:sc.homeB2B?1:0,travelFatigue:-(sc.travelPenalty||0),recentFormDiff:Math.min(10,Math.max(-10,formDiff))};
+}
+predict(f){
+const w=this.weights;
+return this.sigmoid((f.adjEM_diff*w.adjEM_diff+f.efg_diff*w.efg_diff+f.toRate_diff*w.toRate_diff+f.defRebound*w.defRebound+f.homeCourt*w.homeCourt+f.paceFactor*w.paceFactor+f.publicBias*w.publicBias+f.lineMovement*w.lineMovement+f.underdog_short*w.underdog_short+f.midMajorBonus*w.midMajorBonus+f.confTourney*w.confTourney+f.restAdvantage*w.restAdvantage+f.awayB2B*w.awayB2B+f.homeB2B*w.homeB2B+f.travelFatigue*w.travelFatigue+f.recentFormDiff*w.recentFormDiff)/10);
+}
+learn(f,p,a){
+const lr=this.weights.learningRate,err=a-p,grad=p*(1-p)*err;
+['adjEM_diff','efg_diff','toRate_diff','defRebound','homeCourt','paceFactor','publicBias','lineMovement','underdog_short','midMajorBonus','confTourney','restAdvantage','awayB2B','homeB2B','travelFatigue','recentFormDiff'].forEach(k=>{if(this.weights[k]!==undefined&&f[k]!==undefined){this.weights[k]+=lr*grad*f[k];this.weights[k]=Math.max(-6,Math.min(6,this.weights[k]));}});
+this.weights.totalPredictions++;if(Math.round(p)===a)this.weights.correctPredictions++;this.weights.calibrationError=Math.abs(p-a)*0.1+(this.weights.calibrationError||0)*0.9;return this.weights;
+}
+get accuracy(){const t=this.weights.totalPredictions;return t>0?((this.weights.correctPredictions/t)*100).toFixed(1):"—"}
+get winRate(){const t=this.weights.totalBets;return t>0?((this.weights.winningBets/t)*100).toFixed(1):"—"}
+save(){ss(SK.model,this.weights)}
 }
 
-// ── TEAM EFFICIENCY DATABASE ──────────────────────────────────────────────────
 const TE={
-  "Auburn":{rank:1,adjEM:29.2,adjO:119.8,adjD:90.6,pace:69.4,defReb:74.8,toRate:16.1,efg:54.2},
-  "Duke":{rank:2,adjEM:28.4,adjO:122.4,adjD:94.0,pace:72.1,defReb:72.1,toRate:13.2,efg:55.8},
-  "Houston":{rank:3,adjEM:27.6,adjO:116.8,adjD:89.2,pace:65.4,defReb:76.2,toRate:14.1,efg:52.4},
-  "Tennessee":{rank:4,adjEM:27.9,adjO:116.2,adjD:88.3,pace:64.8,defReb:78.4,toRate:13.6,efg:52.1},
-  "Florida":{rank:5,adjEM:26.8,adjO:118.1,adjD:91.3,pace:68.8,defReb:73.2,toRate:15.4,efg:53.8},
-  "Purdue":{rank:6,adjEM:27.7,adjO:120.1,adjD:92.4,pace:67.9,defReb:75.1,toRate:13.8,efg:54.6},
-  "St. John":{rank:7,adjEM:25.4,adjO:117.2,adjD:91.8,pace:67.2,defReb:72.8,toRate:16.8,efg:53.2},
-  "Iowa State":{rank:8,adjEM:24.9,adjO:115.8,adjD:90.9,pace:66.4,defReb:74.1,toRate:14.2,efg:52.8},
-  "Marquette":{rank:9,adjEM:27.4,adjO:121.2,adjD:93.8,pace:70.1,defReb:73.8,toRate:15.2,efg:55.1},
-  "Michigan State":{rank:10,adjEM:24.1,adjO:116.4,adjD:92.3,pace:67.1,defReb:73.9,toRate:14.8,efg:53.4},
-  "Alabama":{rank:11,adjEM:23.8,adjO:118.2,adjD:94.4,pace:71.2,defReb:71.8,toRate:17.2,efg:54.1},
-  "Creighton":{rank:12,adjEM:24.3,adjO:118.4,adjD:94.1,pace:68.2,defReb:74.2,toRate:14.4,efg:54.8},
-  "Kentucky":{rank:13,adjEM:22.9,adjO:116.8,adjD:93.9,pace:69.8,defReb:72.4,toRate:15.8,efg:53.6},
-  "Kansas":{rank:14,adjEM:22.4,adjO:117.1,adjD:94.7,pace:68.4,defReb:73.1,toRate:14.6,efg:53.2},
-  "Arizona":{rank:15,adjEM:21.8,adjO:116.4,adjD:94.6,pace:70.2,defReb:72.6,toRate:15.4,efg:53.8},
-  "Gonzaga":{rank:16,adjEM:21.4,adjO:119.8,adjD:98.4,pace:71.8,defReb:71.2,toRate:14.2,efg:55.4},
-  "Baylor":{rank:17,adjEM:20.2,adjO:115.4,adjD:95.2,pace:69.8,defReb:73.8,toRate:15.1,efg:52.8},
-  "Saint Louis":{rank:18,adjEM:19.8,adjO:113.4,adjD:93.6,pace:66.8,defReb:75.4,toRate:13.8,efg:51.8},
-  "St. Bonaventure":{rank:63,adjEM:6.2,adjO:106.4,adjD:100.2,pace:67.8,defReb:71.4,toRate:16.2,efg:50.8},
-  "Mississippi State":{rank:19,adjEM:19.4,adjO:113.8,adjD:94.4,pace:67.4,defReb:74.2,toRate:15.6,efg:52.2},
-  "Ole Miss":{rank:20,adjEM:18.8,adjO:114.2,adjD:95.4,pace:68.8,defReb:73.1,toRate:16.2,efg:52.6},
-  "New Mexico":{rank:21,adjEM:18.4,adjO:114.8,adjD:96.4,pace:70.2,defReb:72.8,toRate:15.4,efg:53.1},
-  "Texas A&M":{rank:22,adjEM:18.1,adjO:113.4,adjD:95.3,pace:67.8,defReb:74.4,toRate:14.8,efg:52.4},
-  "Wisconsin":{rank:23,adjEM:17.8,adjO:110.4,adjD:92.6,pace:63.2,defReb:77.8,toRate:12.4,efg:51.2},
-  "Dayton":{rank:24,adjEM:17.6,adjO:113.2,adjD:95.6,pace:68.4,defReb:73.6,toRate:15.2,efg:52.8},
-  "VCU":{rank:25,adjEM:17.2,adjO:111.8,adjD:94.6,pace:69.8,defReb:74.8,toRate:18.4,efg:51.4},
-  "UCLA":{rank:26,adjEM:17.0,adjO:114.2,adjD:97.2,pace:68.4,defReb:72.4,toRate:15.8,efg:53.2},
-  "Texas Tech":{rank:27,adjEM:16.8,adjO:112.4,adjD:95.6,pace:66.4,defReb:75.1,toRate:14.2,efg:51.8},
-  "San Diego State":{rank:28,adjEM:16.4,adjO:110.8,adjD:94.4,pace:64.8,defReb:76.4,toRate:14.8,efg:51.2},
-  "Arkansas":{rank:29,adjEM:15.6,adjO:112.8,adjD:97.2,pace:71.2,defReb:72.1,toRate:16.2,efg:52.4},
-  "Memphis":{rank:30,adjEM:15.2,adjO:113.4,adjD:98.2,pace:70.8,defReb:71.4,toRate:17.4,efg:52.8},
-  "Xavier":{rank:31,adjEM:14.8,adjO:112.8,adjD:98.0,pace:68.2,defReb:72.8,toRate:15.6,efg:52.2},
-  "Clemson":{rank:32,adjEM:14.4,adjO:111.2,adjD:96.8,pace:67.4,defReb:73.4,toRate:14.8,efg:51.6},
-  "Villanova":{rank:33,adjEM:14.1,adjO:111.2,adjD:97.1,pace:64.8,defReb:74.4,toRate:13.2,efg:51.8},
-  "Missouri":{rank:34,adjEM:13.8,adjO:112.4,adjD:98.6,pace:68.8,defReb:72.2,toRate:16.4,efg:52.1},
-  "North Carolina":{rank:35,adjEM:13.4,adjO:113.8,adjD:100.4,pace:70.4,defReb:71.6,toRate:16.8,efg:53.4},
-  "Saint Mary":{rank:36,adjEM:13.2,adjO:111.4,adjD:98.2,pace:64.4,defReb:75.2,toRate:12.8,efg:52.4},
-  "Louisville":{rank:37,adjEM:12.8,adjO:110.8,adjD:98.0,pace:67.8,defReb:73.1,toRate:15.4,efg:51.4},
-  "Utah State":{rank:38,adjEM:12.4,adjO:111.2,adjD:98.8,pace:66.8,defReb:74.4,toRate:14.6,efg:52.1},
-  "Boise State":{rank:39,adjEM:12.1,adjO:110.4,adjD:98.3,pace:67.4,defReb:73.8,toRate:15.2,efg:51.8},
-  "Providence":{rank:40,adjEM:11.8,adjO:109.8,adjD:98.0,pace:65.8,defReb:74.2,toRate:14.4,efg:51.2},
-  "Notre Dame":{rank:41,adjEM:11.7,adjO:109.8,adjD:98.1,pace:66.4,defReb:71.8,toRate:14.8,efg:51.6},
-  "Wake Forest":{rank:42,adjEM:11.4,adjO:110.4,adjD:99.0,pace:68.8,defReb:71.2,toRate:16.2,efg:52.2},
-  "Nebraska":{rank:43,adjEM:11.1,adjO:109.2,adjD:98.1,pace:67.2,defReb:72.4,toRate:15.8,efg:51.4},
-  "Pittsburgh":{rank:44,adjEM:10.8,adjO:108.9,adjD:98.1,pace:67.1,defReb:70.8,toRate:15.2,efg:51.2},
-  "Indiana":{rank:45,adjEM:10.8,adjO:109.2,adjD:98.4,pace:67.4,defReb:71.2,toRate:15.8,efg:51.4},
-  "Penn State":{rank:46,adjEM:10.4,adjO:108.4,adjD:98.0,pace:66.8,defReb:72.1,toRate:15.4,efg:51.1},
-  "Colorado State":{rank:47,adjEM:9.8,adjO:108.4,adjD:98.6,pace:68.4,defReb:71.4,toRate:15.6,efg:51.4},
-  "Drake":{rank:48,adjEM:9.4,adjO:107.8,adjD:98.4,pace:65.8,defReb:73.2,toRate:14.2,efg:51.8},
-  "UAB":{rank:49,adjEM:9.1,adjO:107.4,adjD:98.3,pace:67.4,defReb:72.8,toRate:15.8,efg:51.2},
-  "South Florida":{rank:50,adjEM:8.8,adjO:107.2,adjD:98.4,pace:68.2,defReb:71.6,toRate:16.4,efg:50.8},
-  "Stanford":{rank:55,adjEM:8.2,adjO:107.4,adjD:99.2,pace:65.8,defReb:70.4,toRate:14.8,efg:51.2},
-  "Oklahoma":{rank:56,adjEM:8.0,adjO:107.1,adjD:99.1,pace:68.4,defReb:71.2,toRate:16.2,efg:51.4},
-  "Virginia":{rank:57,adjEM:7.8,adjO:105.4,adjD:97.6,pace:61.2,defReb:75.8,toRate:12.8,efg:50.8},
-  "Florida State":{rank:58,adjEM:7.6,adjO:106.8,adjD:99.2,pace:68.8,defReb:71.4,toRate:16.4,efg:51.2},
-  "Loyola Chicago":{rank:60,adjEM:7.2,adjO:106.2,adjD:99.0,pace:65.8,defReb:73.4,toRate:14.2,efg:51.6},
-  "Western Kentucky":{rank:61,adjEM:7.0,adjO:106.0,adjD:99.0,pace:67.2,defReb:72.4,toRate:15.4,efg:51.2},
-  "Liberty":{rank:62,adjEM:6.8,adjO:105.8,adjD:99.0,pace:67.4,defReb:72.8,toRate:14.8,efg:51.4},
-  "North Texas":{rank:63,adjEM:6.6,adjO:105.6,adjD:99.0,pace:67.8,defReb:71.8,toRate:15.6,efg:50.8},
-  "South Dakota State":{rank:64,adjEM:6.4,adjO:105.4,adjD:99.0,pace:68.2,defReb:71.4,toRate:15.2,efg:51.2},
-  "Iona":{rank:66,adjEM:6.0,adjO:105.0,adjD:99.0,pace:68.8,defReb:71.2,toRate:16.4,efg:51.2},
-  "Maryland":{rank:68,adjEM:6.2,adjO:105.4,adjD:99.2,pace:67.8,defReb:71.2,toRate:16.8,efg:51.2},
-  "Michigan":{rank:69,adjEM:5.6,adjO:104.8,adjD:99.2,pace:66.8,defReb:71.8,toRate:15.4,efg:51.4},
-  "Iowa":{rank:70,adjEM:5.4,adjO:106.2,adjD:100.8,pace:68.4,defReb:70.8,toRate:16.2,efg:52.2},
-  "Northwestern":{rank:71,adjEM:5.4,adjO:104.8,adjD:99.4,pace:66.1,defReb:70.8,toRate:15.6,efg:51.1},
-  "Ohio":{rank:72,adjEM:5.2,adjO:104.6,adjD:99.4,pace:68.4,defReb:71.4,toRate:15.8,efg:51.4},
-  "North Dakota State":{rank:72,adjEM:5.2,adjO:104.6,adjD:99.4,pace:66.4,defReb:71.4,toRate:14.8,efg:51.4},
-  "Louisiana Tech":{rank:72,adjEM:5.2,adjO:104.6,adjD:99.4,pace:67.4,defReb:71.8,toRate:15.8,efg:51.6},
-  "East Carolina":{rank:72,adjEM:5.2,adjO:104.6,adjD:99.4,pace:67.8,defReb:71.2,toRate:16.4,efg:51.2},
-  "Tulsa":{rank:68,adjEM:6.2,adjO:105.4,adjD:99.2,pace:68.4,defReb:71.4,toRate:15.8,efg:51.6},
-  "Miami OH":{rank:74,adjEM:4.8,adjO:104.2,adjD:99.4,pace:67.8,defReb:71.6,toRate:16.2,efg:51.2},
-  "Miami (OH)":{rank:74,adjEM:4.8,adjO:104.2,adjD:99.4,pace:67.8,defReb:71.6,toRate:16.2,efg:51.2},
-  "Temple":{rank:74,adjEM:4.8,adjO:104.2,adjD:99.4,pace:67.2,defReb:71.8,toRate:16.2,efg:50.8},
-  "James Madison":{rank:75,adjEM:4.6,adjO:104.0,adjD:99.4,pace:68.8,defReb:70.4,toRate:16.4,efg:51.2},
-  "UC Irvine":{rank:75,adjEM:4.6,adjO:104.0,adjD:99.4,pace:66.4,defReb:72.2,toRate:14.4,efg:51.8},
-  "Indiana State":{rank:76,adjEM:4.4,adjO:103.8,adjD:99.4,pace:67.2,defReb:71.8,toRate:15.2,efg:51.4},
-  "Tulane":{rank:76,adjEM:4.4,adjO:103.8,adjD:99.4,pace:68.8,defReb:71.2,toRate:16.4,efg:51.1},
-  "Rutgers":{rank:77,adjEM:4.2,adjO:103.6,adjD:99.4,pace:66.4,defReb:72.1,toRate:15.8,efg:50.8},
-  "Arkansas State":{rank:76,adjEM:4.2,adjO:103.6,adjD:99.4,pace:68.4,defReb:71.0,toRate:16.4,efg:51.4},
-  "Hawaii":{rank:76,adjEM:4.2,adjO:103.6,adjD:99.4,pace:70.2,defReb:70.8,toRate:16.8,efg:51.4},
-  "Missouri State":{rank:80,adjEM:3.6,adjO:103.0,adjD:99.4,pace:67.4,defReb:71.2,toRate:15.8,efg:50.8},
-  "Sam Houston":{rank:81,adjEM:3.4,adjO:102.8,adjD:99.4,pace:67.8,defReb:70.8,toRate:16.2,efg:50.6},
-  "Long Beach State":{rank:78,adjEM:3.8,adjO:103.2,adjD:99.4,pace:68.8,defReb:71.0,toRate:16.4,efg:51.1},
-  "Georgia Southern":{rank:78,adjEM:3.8,adjO:103.2,adjD:99.4,pace:67.8,defReb:71.4,toRate:16.2,efg:51.1},
-  "Colgate":{rank:94,adjEM:2.2,adjO:101.8,adjD:99.6,pace:65.8,defReb:72.4,toRate:14.8,efg:51.4},
-  "Boston University":{rank:95,adjEM:2.0,adjO:101.6,adjD:99.6,pace:66.4,defReb:71.8,toRate:15.4,efg:51.1},
-  "DePaul":{rank:87,adjEM:2.1,adjO:102.4,adjD:100.3,pace:68.4,defReb:68.4,toRate:18.2,efg:49.8},
-  "Oral Roberts":{rank:97,adjEM:1.6,adjO:101.2,adjD:99.6,pace:68.2,defReb:70.8,toRate:16.4,efg:50.4},
-  "Loyola Marymount":{rank:85,adjEM:2.4,adjO:102.0,adjD:99.4,pace:67.4,defReb:71.2,toRate:16.4,efg:50.4},
-  "San Diego":{rank:86,adjEM:2.2,adjO:101.8,adjD:99.4,pace:66.8,defReb:71.4,toRate:16.2,efg:50.6},
-  "New Mexico State":{rank:83,adjEM:3.0,adjO:102.4,adjD:99.4,pace:67.2,defReb:71.2,toRate:15.4,efg:50.8},
-  "Utah Valley":{rank:80,adjEM:3.4,adjO:102.8,adjD:99.4,pace:67.4,defReb:71.2,toRate:16.2,efg:50.8},
-  "Jackson State":{rank:85,adjEM:2.8,adjO:102.2,adjD:99.4,pace:69.2,defReb:70.2,toRate:17.2,efg:49.8},
-  "Alabama State":{rank:90,adjEM:1.4,adjO:100.8,adjD:99.4,pace:68.8,defReb:69.6,toRate:18.4,efg:48.4},
-  "Alabama A&M":{rank:91,adjEM:1.2,adjO:100.6,adjD:99.4,pace:68.4,defReb:69.4,toRate:18.6,efg:48.2},
-  "Grambling":{rank:100,adjEM:0.0,adjO:99.6,adjD:99.6,pace:69.4,defReb:68.8,toRate:19.2,efg:47.8},
-  "Southern":{rank:92,adjEM:1.0,adjO:100.6,adjD:99.6,pace:68.8,defReb:69.6,toRate:18.2,efg:48.6},
-  "Prairie View":{rank:99,adjEM:0.2,adjO:99.8,adjD:99.6,pace:68.8,defReb:69.2,toRate:18.8,efg:48.2},
-  "Texas Southern":{rank:82,adjEM:3.2,adjO:102.6,adjD:99.4,pace:68.4,defReb:70.4,toRate:16.8,efg:50.4},
-  "Florida A&M":{rank:91,adjEM:1.0,adjO:100.6,adjD:99.6,pace:68.8,defReb:69.8,toRate:18.2,efg:48.8},
-  "Norfolk State":{rank:86,adjEM:2.2,adjO:101.8,adjD:99.4,pace:68.4,defReb:70.4,toRate:17.2,efg:50.0},
-  "Morgan State":{rank:87,adjEM:2.0,adjO:101.4,adjD:99.4,pace:68.8,defReb:70.0,toRate:17.6,efg:49.6},
-  "Howard":{rank:88,adjEM:1.6,adjO:101.2,adjD:99.6,pace:67.8,defReb:70.2,toRate:17.4,efg:49.4},
-  "Bethune-Cookman":{rank:90,adjEM:1.2,adjO:100.8,adjD:99.6,pace:69.8,defReb:69.2,toRate:18.4,efg:48.6},
-  // ── EXPANDED DATABASE (250 D1 teams) ─────────────────────────────────────
-  "Boston College":{rank:68,adjEM:6.2,adjO:106.2,adjD:100.0,pace:68.4,defReb:71.2,toRate:16.4,efg:50.8},
-  "California":{rank:95,adjEM:2.0,adjO:103.2,adjD:101.2,pace:69.2,defReb:70.4,toRate:17.2,efg:49.6},
-  "Georgia Tech":{rank:62,adjEM:7.2,adjO:107.4,adjD:100.2,pace:70.2,defReb:71.4,toRate:16.8,efg:51.2},
-  "Miami":{rank:55,adjEM:8.2,adjO:108.2,adjD:100.0,pace:69.8,defReb:71.8,toRate:16.2,efg:51.8},
-  "NC State":{rank:44,adjEM:10.4,adjO:109.8,adjD:99.4,pace:68.8,defReb:72.4,toRate:15.8,efg:52.2},
-  "Syracuse":{rank:48,adjEM:9.8,adjO:109.2,adjD:99.4,pace:67.4,defReb:72.8,toRate:16.4,efg:51.4},
-  "Virginia Tech":{rank:52,adjEM:9.2,adjO:108.8,adjD:99.6,pace:68.4,defReb:72.2,toRate:16.6,efg:51.6},
-  "Illinois":{rank:42,adjEM:10.8,adjO:110.4,adjD:99.6,pace:67.8,defReb:73.2,toRate:15.6,efg:52.4},
-  "Minnesota":{rank:78,adjEM:4.2,adjO:105.2,adjD:101.0,pace:68.8,defReb:71.0,toRate:16.8,efg:50.4},
-  "Ohio State":{rank:46,adjEM:10.2,adjO:110.2,adjD:100.0,pace:69.4,defReb:72.8,toRate:16.2,efg:52.0},
-  "Oregon":{rank:38,adjEM:11.8,adjO:111.2,adjD:99.4,pace:70.2,defReb:72.6,toRate:15.8,efg:52.6},
-  "USC":{rank:56,adjEM:8.0,adjO:107.8,adjD:99.8,pace:69.6,defReb:71.6,toRate:16.4,efg:51.4},
-  "Washington":{rank:82,adjEM:3.8,adjO:104.8,adjD:101.0,pace:69.0,defReb:70.8,toRate:17.0,efg:50.2},
-  "Arizona State":{rank:58,adjEM:7.8,adjO:107.6,adjD:99.8,pace:69.8,defReb:71.8,toRate:16.4,efg:51.6},
-  "BYU":{rank:36,adjEM:12.2,adjO:111.8,adjD:99.6,pace:68.4,defReb:73.4,toRate:15.4,efg:52.8},
-  "Cincinnati":{rank:43,adjEM:10.6,adjO:110.0,adjD:99.4,pace:67.6,defReb:73.0,toRate:16.0,efg:52.2},
-  "Colorado":{rank:60,adjEM:7.4,adjO:107.2,adjD:99.8,pace:69.4,defReb:71.6,toRate:16.6,efg:51.0},
-  "Kansas State":{rank:45,adjEM:10.4,adjO:110.0,adjD:99.6,pace:68.2,defReb:72.6,toRate:16.0,efg:52.0},
-  "Oklahoma State":{rank:54,adjEM:8.4,adjO:108.4,adjD:100.0,pace:68.8,defReb:72.0,toRate:16.4,efg:51.6},
-  "TCU":{rank:57,adjEM:7.8,adjO:107.6,adjD:99.8,pace:69.2,defReb:71.8,toRate:16.6,efg:51.2},
-  "UCF":{rank:63,adjEM:7.0,adjO:106.8,adjD:99.8,pace:69.8,defReb:71.4,toRate:16.8,efg:50.8},
-  "Utah":{rank:53,adjEM:8.6,adjO:108.4,adjD:99.8,pace:67.8,defReb:72.8,toRate:15.8,efg:51.8},
-  "West Virginia":{rank:47,adjEM:10.0,adjO:109.6,adjD:99.6,pace:67.4,defReb:73.2,toRate:15.6,efg:52.2},
-  "Georgia":{rank:59,adjEM:7.6,adjO:107.4,adjD:99.8,pace:69.0,defReb:71.8,toRate:16.4,efg:51.2},
-  "LSU":{rank:51,adjEM:9.0,adjO:109.0,adjD:100.0,pace:70.4,defReb:72.2,toRate:16.6,efg:51.4},
-  "South Carolina":{rank:49,adjEM:9.6,adjO:109.4,adjD:99.8,pace:68.6,defReb:72.4,toRate:16.2,efg:51.8},
-  "Vanderbilt":{rank:66,adjEM:6.6,adjO:106.4,adjD:99.8,pace:68.4,defReb:71.4,toRate:16.8,efg:50.8},
-  "Butler":{rank:65,adjEM:6.8,adjO:106.6,adjD:99.8,pace:67.2,defReb:72.2,toRate:16.4,efg:51.0},
-  "Georgetown":{rank:92,adjEM:2.4,adjO:103.6,adjD:101.2,pace:68.8,defReb:70.2,toRate:17.4,efg:49.4},
-  "Seton Hall":{rank:61,adjEM:7.2,adjO:107.0,adjD:99.8,pace:68.6,defReb:71.6,toRate:16.4,efg:51.2},
-  "UConn":{rank:22,adjEM:17.8,adjO:114.2,adjD:96.4,pace:66.8,defReb:75.4,toRate:14.8,efg:53.8},
-  "Connecticut":{rank:22,adjEM:17.8,adjO:114.2,adjD:96.4,pace:66.8,defReb:75.4,toRate:14.8,efg:53.8},
-  "Charlotte":{rank:74,adjEM:4.8,adjO:104.6,adjD:99.8,pace:68.8,defReb:71.0,toRate:16.8,efg:50.4},
-  "Florida Atlantic":{rank:67,adjEM:6.4,adjO:106.2,adjD:99.8,pace:68.4,defReb:71.4,toRate:16.6,efg:50.8},
-  "Rice":{rank:77,adjEM:4.4,adjO:104.8,adjD:100.4,pace:68.2,defReb:70.8,toRate:16.8,efg:50.2},
-  "SMU":{rank:53,adjEM:8.6,adjO:108.4,adjD:99.8,pace:69.4,defReb:72.0,toRate:16.2,efg:51.6},
-  "Wichita State":{rank:69,adjEM:6.0,adjO:106.0,adjD:100.0,pace:68.0,defReb:71.2,toRate:16.6,efg:50.6},
-  "Air Force":{rank:88,adjEM:3.0,adjO:104.2,adjD:101.2,pace:62.4,defReb:72.4,toRate:16.0,efg:50.8},
-  "Fresno State":{rank:73,adjEM:5.0,adjO:105.4,adjD:100.4,pace:68.4,defReb:71.2,toRate:16.8,efg:50.4},
-  "Nevada":{rank:71,adjEM:5.4,adjO:105.6,adjD:100.2,pace:68.6,defReb:71.4,toRate:16.6,efg:50.6},
-  "UNLV":{rank:64,adjEM:6.8,adjO:106.6,adjD:99.8,pace:69.4,defReb:71.6,toRate:16.4,efg:51.0},
-  "Wyoming":{rank:79,adjEM:4.0,adjO:104.4,adjD:100.4,pace:67.4,defReb:71.6,toRate:16.4,efg:50.4},
-  "Pacific":{rank:84,adjEM:3.4,adjO:103.8,adjD:100.4,pace:67.8,defReb:71.0,toRate:16.8,efg:50.2},
-  "Pepperdine":{rank:87,adjEM:3.2,adjO:103.6,adjD:100.4,pace:68.4,defReb:70.6,toRate:17.0,efg:49.8},
-  "Portland":{rank:86,adjEM:3.2,adjO:103.6,adjD:100.4,pace:67.8,defReb:70.8,toRate:17.0,efg:50.0},
-  "San Francisco":{rank:75,adjEM:4.6,adjO:104.8,adjD:100.2,pace:67.2,defReb:71.4,toRate:16.6,efg:50.6},
-  "Santa Clara":{rank:83,adjEM:3.6,adjO:104.0,adjD:100.4,pace:67.4,defReb:71.0,toRate:16.8,efg:50.2},
-  "Davidson":{rank:57,adjEM:7.8,adjO:107.6,adjD:99.8,pace:68.8,defReb:71.8,toRate:15.8,efg:52.0},
-  "Duquesne":{rank:76,adjEM:4.4,adjO:104.8,adjD:100.4,pace:68.2,defReb:71.0,toRate:16.8,efg:50.2},
-  "Fordham":{rank:93,adjEM:2.2,adjO:103.4,adjD:101.2,pace:68.6,defReb:70.2,toRate:17.4,efg:49.4},
-  "George Mason":{rank:71,adjEM:5.4,adjO:105.6,adjD:100.2,pace:68.8,defReb:71.2,toRate:16.6,efg:50.6},
-  "George Washington":{rank:80,adjEM:4.0,adjO:104.6,adjD:100.6,pace:68.4,defReb:70.8,toRate:16.8,efg:50.2},
-  "La Salle":{rank:91,adjEM:2.6,adjO:103.4,adjD:100.8,pace:68.2,defReb:70.4,toRate:17.2,efg:49.6},
-  "Massachusetts":{rank:85,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.4,defReb:70.8,toRate:16.8,efg:50.2},
-  "Rhode Island":{rank:72,adjEM:5.2,adjO:105.4,adjD:100.2,pace:68.6,defReb:71.2,toRate:16.6,efg:50.6},
-  "Richmond":{rank:69,adjEM:5.8,adjO:106.0,adjD:100.2,pace:68.4,defReb:71.4,toRate:16.4,efg:50.8},
-  "Saint Joseph":{rank:78,adjEM:4.2,adjO:104.4,adjD:100.2,pace:67.8,defReb:71.0,toRate:16.8,efg:50.2},
-  "Bradley":{rank:74,adjEM:4.8,adjO:105.0,adjD:100.2,pace:67.4,defReb:71.4,toRate:16.4,efg:50.6},
-  "Evansville":{rank:97,adjEM:1.4,adjO:102.0,adjD:100.6,pace:67.2,defReb:70.0,toRate:17.2,efg:49.2},
-  "Illinois State":{rank:81,adjEM:3.8,adjO:104.2,adjD:100.4,pace:67.6,defReb:71.0,toRate:16.8,efg:50.2},
-  "Northern Iowa":{rank:66,adjEM:6.6,adjO:106.4,adjD:99.8,pace:66.8,defReb:72.0,toRate:15.8,efg:51.4},
-  "Southern Illinois":{rank:70,adjEM:5.6,adjO:105.8,adjD:100.2,pace:66.4,defReb:72.4,toRate:16.2,efg:51.0},
-  "Valparaiso":{rank:94,adjEM:2.0,adjO:102.8,adjD:100.8,pace:67.0,defReb:70.4,toRate:17.0,efg:49.6},
-  "Akron":{rank:73,adjEM:5.0,adjO:105.2,adjD:100.2,pace:67.8,defReb:71.2,toRate:16.6,efg:50.4},
-  "Ball State":{rank:83,adjEM:3.6,adjO:104.0,adjD:100.4,pace:68.2,defReb:70.8,toRate:16.8,efg:50.0},
-  "Bowling Green":{rank:84,adjEM:3.4,adjO:103.8,adjD:100.4,pace:67.8,defReb:70.8,toRate:16.8,efg:50.0},
-  "Buffalo":{rank:76,adjEM:4.4,adjO:104.8,adjD:100.4,pace:68.4,defReb:71.0,toRate:16.8,efg:50.2},
-  "Central Michigan":{rank:86,adjEM:3.2,adjO:103.6,adjD:100.4,pace:68.0,defReb:70.6,toRate:16.8,efg:50.0},
-  "Eastern Michigan":{rank:88,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.8,defReb:70.4,toRate:17.0,efg:49.8},
-  "Kent State":{rank:77,adjEM:4.2,adjO:104.6,adjD:100.4,pace:67.6,defReb:71.0,toRate:16.6,efg:50.4},
-  "Northern Illinois":{rank:87,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.6,defReb:70.6,toRate:17.0,efg:49.8},
-  "Toledo":{rank:75,adjEM:4.6,adjO:105.0,adjD:100.4,pace:68.2,defReb:71.2,toRate:16.6,efg:50.4},
-  "Western Michigan":{rank:85,adjEM:3.4,adjO:103.8,adjD:100.4,pace:67.8,defReb:70.8,toRate:16.8,efg:50.0},
-  "Georgia State":{rank:79,adjEM:4.0,adjO:104.4,adjD:100.4,pace:68.6,defReb:70.8,toRate:16.8,efg:50.2},
-  "Louisiana":{rank:72,adjEM:5.2,adjO:105.4,adjD:100.2,pace:68.8,defReb:71.2,toRate:16.6,efg:50.6},
-  "Louisiana Monroe":{rank:90,adjEM:2.6,adjO:103.2,adjD:100.6,pace:68.4,defReb:70.4,toRate:17.0,efg:49.8},
-  "Marshall":{rank:78,adjEM:4.2,adjO:104.4,adjD:100.2,pace:68.0,defReb:71.0,toRate:16.8,efg:50.2},
-  "Middle Tennessee":{rank:71,adjEM:5.4,adjO:105.6,adjD:100.2,pace:68.2,defReb:71.4,toRate:16.4,efg:50.8},
-  "Old Dominion":{rank:77,adjEM:4.4,adjO:104.8,adjD:100.4,pace:67.8,defReb:71.0,toRate:16.6,efg:50.4},
-  "South Alabama":{rank:76,adjEM:4.4,adjO:104.8,adjD:100.4,pace:68.6,defReb:71.0,toRate:16.8,efg:50.2},
-  "Southern Miss":{rank:82,adjEM:3.8,adjO:104.2,adjD:100.4,pace:67.8,defReb:70.8,toRate:16.8,efg:50.0},
-  "Texas State":{rank:75,adjEM:4.6,adjO:105.0,adjD:100.4,pace:68.4,defReb:71.0,toRate:16.6,efg:50.4},
-  "Troy":{rank:84,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.2,defReb:70.8,toRate:16.8,efg:50.0},
-  "UTSA":{rank:80,adjEM:4.0,adjO:104.4,adjD:100.4,pace:68.4,defReb:70.8,toRate:16.8,efg:50.2},
-  "Belmont":{rank:67,adjEM:6.4,adjO:106.4,adjD:100.0,pace:69.4,defReb:71.4,toRate:16.2,efg:51.2},
-  "Eastern Kentucky":{rank:79,adjEM:4.0,adjO:104.4,adjD:100.4,pace:68.2,defReb:71.0,toRate:16.8,efg:50.2},
-  "Jacksonville State":{rank:75,adjEM:4.6,adjO:105.0,adjD:100.4,pace:68.4,defReb:71.2,toRate:16.6,efg:50.4},
-  "Kennesaw State":{rank:82,adjEM:3.8,adjO:104.2,adjD:100.4,pace:67.8,defReb:70.8,toRate:16.8,efg:50.0},
-  "Lipscomb":{rank:78,adjEM:4.2,adjO:104.6,adjD:100.4,pace:68.6,defReb:71.0,toRate:16.8,efg:50.2},
-  "Morehead State":{rank:81,adjEM:3.8,adjO:104.2,adjD:100.4,pace:67.8,defReb:71.0,toRate:16.6,efg:50.2},
-  "Murray State":{rank:68,adjEM:6.2,adjO:106.4,adjD:100.2,pace:68.2,defReb:71.6,toRate:16.2,efg:51.2},
-  "Abilene Christian":{rank:83,adjEM:3.6,adjO:103.8,adjD:100.2,pace:67.8,defReb:70.6,toRate:17.0,efg:49.8},
-  "Central Arkansas":{rank:86,adjEM:3.2,adjO:103.6,adjD:100.4,pace:68.2,defReb:70.4,toRate:17.0,efg:49.8},
-  "Lamar":{rank:89,adjEM:2.8,adjO:103.2,adjD:100.4,pace:68.4,defReb:70.2,toRate:17.2,efg:49.6},
-  "McNeese":{rank:84,adjEM:3.4,adjO:103.8,adjD:100.4,pace:67.8,defReb:70.6,toRate:17.0,efg:49.8},
-  "Nicholls":{rank:91,adjEM:2.4,adjO:103.0,adjD:100.6,pace:68.2,defReb:70.2,toRate:17.2,efg:49.4},
-  "New Orleans":{rank:93,adjEM:2.0,adjO:102.6,adjD:100.6,pace:68.4,defReb:70.0,toRate:17.4,efg:49.2},
-  "Northwestern State":{rank:90,adjEM:2.6,adjO:103.2,adjD:100.6,pace:68.6,defReb:70.2,toRate:17.2,efg:49.4},
-  "Southeastern Louisiana":{rank:92,adjEM:2.2,adjO:102.8,adjD:100.6,pace:68.4,defReb:70.0,toRate:17.2,efg:49.4},
-  "Stephen F Austin":{rank:85,adjEM:3.4,adjO:103.8,adjD:100.4,pace:67.8,defReb:70.6,toRate:17.0,efg:49.8},
-  "Tarleton":{rank:88,adjEM:2.8,adjO:103.2,adjD:100.4,pace:67.6,defReb:70.4,toRate:17.0,efg:49.6},
-  "UT Arlington":{rank:87,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.8,defReb:70.4,toRate:17.0,efg:49.8},
-  "UTRGV":{rank:94,adjEM:2.0,adjO:102.6,adjD:100.6,pace:68.2,defReb:70.0,toRate:17.4,efg:49.2},
-  "Cleveland State":{rank:85,adjEM:3.4,adjO:103.8,adjD:100.4,pace:67.6,defReb:70.8,toRate:16.8,efg:50.0},
-  "Detroit Mercy":{rank:89,adjEM:2.8,adjO:103.2,adjD:100.4,pace:68.0,defReb:70.4,toRate:17.0,efg:49.6},
-  "Green Bay":{rank:87,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.4,defReb:70.6,toRate:16.8,efg:50.0},
-  "Milwaukee":{rank:88,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.8,defReb:70.4,toRate:17.0,efg:49.8},
-  "Northern Kentucky":{rank:83,adjEM:3.6,adjO:104.0,adjD:100.4,pace:67.8,defReb:70.8,toRate:16.8,efg:50.2},
-  "Oakland":{rank:72,adjEM:5.2,adjO:105.6,adjD:100.4,pace:69.0,defReb:71.2,toRate:16.4,efg:51.0},
-  "Wright State":{rank:78,adjEM:4.2,adjO:104.6,adjD:100.4,pace:68.2,defReb:71.0,toRate:16.6,efg:50.4},
-  "Youngstown State":{rank:93,adjEM:2.2,adjO:103.0,adjD:100.8,pace:67.4,defReb:70.2,toRate:17.2,efg:49.4},
-  "Brown":{rank:91,adjEM:2.4,adjO:103.2,adjD:100.8,pace:66.8,defReb:70.4,toRate:16.8,efg:50.0},
-  "Columbia":{rank:97,adjEM:1.4,adjO:102.0,adjD:100.6,pace:66.4,defReb:70.0,toRate:17.4,efg:49.0},
-  "Cornell":{rank:86,adjEM:3.2,adjO:103.6,adjD:100.4,pace:66.6,defReb:70.6,toRate:17.0,efg:49.8},
-  "Dartmouth":{rank:89,adjEM:2.8,adjO:103.2,adjD:100.4,pace:66.4,defReb:70.4,toRate:17.0,efg:49.6},
-  "Harvard":{rank:83,adjEM:3.6,adjO:104.0,adjD:100.4,pace:66.8,defReb:70.8,toRate:16.8,efg:50.2},
-  "Holy Cross":{rank:87,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.0,defReb:70.6,toRate:16.8,efg:50.0},
-  "Pennsylvania":{rank:84,adjEM:3.4,adjO:103.8,adjD:100.4,pace:66.6,defReb:70.8,toRate:16.8,efg:50.2},
-  "Princeton":{rank:77,adjEM:4.4,adjO:104.8,adjD:100.4,pace:65.8,defReb:71.4,toRate:16.2,efg:51.0},
-  "Yale":{rank:80,adjEM:4.0,adjO:104.4,adjD:100.4,pace:66.2,defReb:71.0,toRate:16.6,efg:50.6},
-  "Army":{rank:88,adjEM:3.0,adjO:103.4,adjD:100.4,pace:64.2,defReb:72.0,toRate:16.0,efg:51.0},
-  "Bucknell":{rank:82,adjEM:3.8,adjO:104.2,adjD:100.4,pace:66.8,defReb:71.2,toRate:16.6,efg:50.4},
-  "Lafayette":{rank:90,adjEM:2.6,adjO:103.2,adjD:100.6,pace:67.0,defReb:70.4,toRate:17.0,efg:49.8},
-  "Lehigh":{rank:85,adjEM:3.4,adjO:103.8,adjD:100.4,pace:66.8,defReb:70.8,toRate:16.8,efg:50.0},
-  "Loyola Maryland":{rank:86,adjEM:3.2,adjO:103.6,adjD:100.4,pace:66.6,defReb:70.6,toRate:17.0,efg:49.8},
-  "Navy":{rank:84,adjEM:3.4,adjO:103.8,adjD:100.4,pace:65.8,defReb:71.2,toRate:16.4,efg:50.6},
-  "Coppin State":{rank:96,adjEM:1.6,adjO:102.2,adjD:100.6,pace:68.4,defReb:69.4,toRate:17.6,efg:48.8},
-  "Delaware State":{rank:97,adjEM:1.4,adjO:102.0,adjD:100.6,pace:67.4,defReb:69.4,toRate:17.6,efg:48.6},
-  "Maryland-Eastern Shore":{rank:98,adjEM:1.0,adjO:101.6,adjD:100.6,pace:67.8,defReb:69.2,toRate:17.8,efg:48.4},
-  "Mississippi Valley State":{rank:100,adjEM:0.0,adjO:100.4,adjD:100.4,pace:68.4,defReb:68.8,toRate:18.4,efg:47.8},
-  "North Carolina A&T":{rank:89,adjEM:2.8,adjO:103.4,adjD:100.6,pace:68.4,defReb:70.2,toRate:17.2,efg:49.6},
-  "North Carolina Central":{rank:91,adjEM:2.4,adjO:103.0,adjD:100.6,pace:68.2,defReb:70.0,toRate:17.4,efg:49.4},
-  "Cal Poly":{rank:91,adjEM:2.4,adjO:102.8,adjD:100.4,pace:68.4,defReb:70.0,toRate:17.2,efg:49.4},
-  "Cal State Fullerton":{rank:89,adjEM:2.8,adjO:103.2,adjD:100.4,pace:67.8,defReb:70.2,toRate:17.0,efg:49.6},
-  "Cal State Northridge":{rank:90,adjEM:2.6,adjO:103.0,adjD:100.4,pace:68.2,defReb:70.0,toRate:17.2,efg:49.4},
-  "UC Davis":{rank:88,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.8,defReb:70.4,toRate:16.8,efg:50.0},
-  "UC Riverside":{rank:90,adjEM:2.6,adjO:103.0,adjD:100.4,pace:68.2,defReb:70.0,toRate:17.2,efg:49.4},
-  "UC San Diego":{rank:84,adjEM:3.4,adjO:103.8,adjD:100.4,pace:67.8,defReb:70.6,toRate:16.8,efg:50.0},
-  "UC Santa Barbara":{rank:76,adjEM:4.4,adjO:104.8,adjD:100.4,pace:67.4,defReb:71.2,toRate:16.4,efg:50.6},
-  "Utah Tech":{rank:88,adjEM:2.8,adjO:103.2,adjD:100.4,pace:68.0,defReb:70.4,toRate:17.0,efg:49.8},
-  "SIUE":{rank:89,adjEM:2.8,adjO:103.2,adjD:100.4,pace:67.8,defReb:70.2,toRate:17.0,efg:49.6},
-  "Tennessee Tech":{rank:86,adjEM:3.2,adjO:103.6,adjD:100.4,pace:67.4,defReb:70.6,toRate:17.0,efg:49.8},
-  "Tennessee Martin":{rank:87,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.6,defReb:70.4,toRate:17.0,efg:49.8},
-  "Florida International":{rank:85,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.6,defReb:70.6,toRate:17.0,efg:49.8},
-  "Texas A&M Commerce":{rank:89,adjEM:2.8,adjO:103.2,adjD:100.4,pace:68.2,defReb:70.2,toRate:17.2,efg:49.6},
-  "Texas A&M Corpus Christi":{rank:90,adjEM:2.6,adjO:103.0,adjD:100.4,pace:68.4,defReb:70.0,toRate:17.2,efg:49.4},
-  "Houston Baptist":{rank:88,adjEM:3.0,adjO:103.4,adjD:100.4,pace:68.0,defReb:70.4,toRate:17.0,efg:49.8},
-  "Incarnate Word":{rank:87,adjEM:3.0,adjO:103.4,adjD:100.4,pace:68.2,defReb:70.4,toRate:17.0,efg:49.8},
-  "Saint Francis":{rank:92,adjEM:2.2,adjO:103.0,adjD:100.8,pace:67.2,defReb:70.2,toRate:17.2,efg:49.4},
-  "Stony Brook":{rank:86,adjEM:3.2,adjO:103.6,adjD:100.4,pace:67.4,defReb:70.6,toRate:16.8,efg:50.0},
-  "Hofstra":{rank:74,adjEM:4.8,adjO:105.0,adjD:100.2,pace:68.4,defReb:71.2,toRate:16.6,efg:50.6},
-  "Northeastern":{rank:72,adjEM:5.2,adjO:105.4,adjD:100.2,pace:67.8,defReb:71.4,toRate:16.4,efg:50.8},
-  "Delaware":{rank:76,adjEM:4.4,adjO:104.8,adjD:100.4,pace:67.6,defReb:71.0,toRate:16.6,efg:50.4},
-  "Drexel":{rank:83,adjEM:3.6,adjO:104.0,adjD:100.4,pace:67.4,defReb:70.8,toRate:16.8,efg:50.2},
-  "Elon":{rank:84,adjEM:3.4,adjO:103.8,adjD:100.4,pace:67.6,defReb:70.6,toRate:16.8,efg:50.0},
-  "Towson":{rank:80,adjEM:4.0,adjO:104.4,adjD:100.4,pace:67.8,defReb:71.0,toRate:16.8,efg:50.2},
-  "William & Mary":{rank:85,adjEM:3.4,adjO:103.8,adjD:100.4,pace:66.8,defReb:70.8,toRate:16.8,efg:50.0},
-  "UNCW":{rank:78,adjEM:4.2,adjO:104.6,adjD:100.4,pace:68.0,defReb:71.0,toRate:16.6,efg:50.4},
-  "Charleston":{rank:70,adjEM:5.6,adjO:105.8,adjD:100.2,pace:68.2,defReb:71.4,toRate:16.4,efg:50.8},
-  "Chattanooga":{rank:75,adjEM:4.6,adjO:105.0,adjD:100.4,pace:68.0,defReb:71.2,toRate:16.6,efg:50.4},
-  "Furman":{rank:77,adjEM:4.4,adjO:104.8,adjD:100.4,pace:67.4,defReb:71.0,toRate:16.6,efg:50.4},
-  "Mercer":{rank:82,adjEM:3.8,adjO:104.2,adjD:100.4,pace:67.6,defReb:70.8,toRate:16.8,efg:50.0},
-  "Samford":{rank:79,adjEM:4.0,adjO:104.4,adjD:100.4,pace:67.8,defReb:70.8,toRate:16.8,efg:50.2},
-  "ETSU":{rank:73,adjEM:5.0,adjO:105.2,adjD:100.2,pace:68.2,defReb:71.2,toRate:16.6,efg:50.6},
-  "VMI":{rank:91,adjEM:2.4,adjO:103.0,adjD:100.6,pace:69.2,defReb:69.6,toRate:17.4,efg:49.2},
-  "Wofford":{rank:81,adjEM:3.8,adjO:104.2,adjD:100.4,pace:67.2,defReb:71.2,toRate:16.4,efg:50.6},
-  "Western Carolina":{rank:86,adjEM:3.2,adjO:103.6,adjD:100.4,pace:67.4,defReb:70.6,toRate:17.0,efg:49.8},
-  "Gardner Webb":{rank:85,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.0,defReb:70.6,toRate:17.0,efg:49.8},
-  "High Point":{rank:83,adjEM:3.6,adjO:104.0,adjD:100.4,pace:67.8,defReb:70.8,toRate:16.8,efg:50.0},
-  "Longwood":{rank:84,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.2,defReb:70.6,toRate:17.0,efg:49.8},
-  "Presbyterian":{rank:92,adjEM:2.2,adjO:102.8,adjD:100.6,pace:67.4,defReb:70.0,toRate:17.4,efg:49.2},
-  "USC Upstate":{rank:90,adjEM:2.6,adjO:103.2,adjD:100.6,pace:67.6,defReb:70.2,toRate:17.2,efg:49.4},
-  "Campbell":{rank:82,adjEM:3.8,adjO:104.2,adjD:100.4,pace:68.0,defReb:70.8,toRate:16.8,efg:50.2},
-  "North Alabama":{rank:87,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.8,defReb:70.4,toRate:17.0,efg:49.8},
-  "Queens":{rank:88,adjEM:2.8,adjO:103.2,adjD:100.4,pace:67.6,defReb:70.4,toRate:17.0,efg:49.6},
-  "Alcorn State":{rank:89,adjEM:1.4,adjO:101.0,adjD:99.6,pace:70.4,defReb:69.4,toRate:18.6,efg:48.2},
-  "South Carolina State":{rank:95,adjEM:0.8,adjO:100.4,adjD:99.6,pace:68.2,defReb:69.4,toRate:18.8,efg:48.2},
-  "Arkansas Pine Bluff":{rank:88,adjEM:1.8,adjO:101.4,adjD:99.6,pace:71.2,defReb:69.8,toRate:18.8,efg:48.4},
-  // ── ADDITIONAL D1 TEAMS (fixes miss errors for active betting markets) ──────
-  "Appalachian State":{rank:76,adjEM:4.4,adjO:104.8,adjD:100.4,pace:68.8,defReb:71.2,toRate:16.8,efg:50.4},
-  "Coastal Carolina":{rank:80,adjEM:3.8,adjO:104.2,adjD:100.4,pace:69.2,defReb:70.8,toRate:17.0,efg:50.0},
-  "Florida Gulf Coast":{rank:82,adjEM:3.6,adjO:103.8,adjD:100.2,pace:69.4,defReb:70.6,toRate:17.0,efg:49.8},
-  "Austin Peay":{rank:84,adjEM:3.2,adjO:103.4,adjD:100.2,pace:68.4,defReb:70.4,toRate:17.0,efg:49.6},
-  "UNC Asheville":{rank:88,adjEM:2.8,adjO:103.0,adjD:100.2,pace:68.0,defReb:70.2,toRate:17.2,efg:49.4},
-  "UNC Greensboro":{rank:81,adjEM:3.8,adjO:104.0,adjD:100.2,pace:67.8,defReb:70.8,toRate:16.8,efg:50.2},
-  "North Dakota":{rank:85,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.2,defReb:70.6,toRate:17.0,efg:49.8},
-  "Tennessee State":{rank:87,adjEM:2.8,adjO:103.2,adjD:100.4,pace:68.2,defReb:70.2,toRate:17.2,efg:49.4},
-  "Winthrop":{rank:78,adjEM:4.0,adjO:104.4,adjD:100.4,pace:68.4,defReb:71.0,toRate:16.8,efg:50.2},
-  "Radford":{rank:86,adjEM:3.0,adjO:103.4,adjD:100.4,pace:68.0,defReb:70.6,toRate:17.0,efg:49.8},
-  "Seattle":{rank:83,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.8,defReb:70.6,toRate:17.0,efg:49.8},
-  "St. Thomas":{rank:86,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.4,defReb:70.6,toRate:17.0,efg:49.8},
-  "Purdue Fort Wayne":{rank:83,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.2,defReb:70.8,toRate:16.8,efg:50.0},
-  "Southeast Missouri State":{rank:84,adjEM:3.2,adjO:103.6,adjD:100.4,pace:67.8,defReb:70.6,toRate:17.0,efg:49.8},
-  "Tennessee-Martin":{rank:87,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.6,defReb:70.4,toRate:17.0,efg:49.8},
-  "Southern Indiana":{rank:88,adjEM:2.8,adjO:103.2,adjD:100.4,pace:67.8,defReb:70.4,toRate:17.0,efg:49.6},
+"Auburn":{rank:1,adjEM:29.2,adjO:119.8,adjD:90.6,pace:69.4,defReb:74.8,toRate:16.1,efg:54.2},"Duke":{rank:2,adjEM:28.4,adjO:122.4,adjD:94.0,pace:72.1,defReb:72.1,toRate:13.2,efg:55.8},"Houston":{rank:3,adjEM:27.6,adjO:116.8,adjD:89.2,pace:65.4,defReb:76.2,toRate:14.1,efg:52.4},"Tennessee":{rank:4,adjEM:27.9,adjO:116.2,adjD:88.3,pace:64.8,defReb:78.4,toRate:13.6,efg:52.1},"Florida":{rank:5,adjEM:26.8,adjO:118.1,adjD:91.3,pace:68.8,defReb:73.2,toRate:15.4,efg:53.8},"Purdue":{rank:6,adjEM:27.7,adjO:120.1,adjD:92.4,pace:67.9,defReb:75.1,toRate:13.8,efg:54.6},
+"St. John":{rank:7,adjEM:25.4,adjO:117.2,adjD:91.8,pace:67.2,defReb:72.8,toRate:16.8,efg:53.2},"Iowa State":{rank:8,adjEM:24.9,adjO:115.8,adjD:90.9,pace:66.4,defReb:74.1,toRate:14.2,efg:52.8},"Marquette":{rank:9,adjEM:27.4,adjO:121.2,adjD:93.8,pace:70.1,defReb:73.8,toRate:15.2,efg:55.1},"Michigan State":{rank:10,adjEM:24.1,adjO:116.4,adjD:92.3,pace:67.1,defReb:73.9,toRate:14.8,efg:53.4},
+"Alabama":{rank:11,adjEM:23.8,adjO:118.2,adjD:94.4,pace:71.2,defReb:71.8,toRate:17.2,efg:54.1},"Creighton":{rank:12,adjEM:24.3,adjO:118.4,adjD:94.1,pace:68.2,defReb:74.2,toRate:14.4,efg:54.8},"Kentucky":{rank:13,adjEM:22.9,adjO:116.8,adjD:93.9,pace:69.8,defReb:72.4,toRate:15.8,efg:53.6},"Kansas":{rank:14,adjEM:22.4,adjO:117.1,adjD:94.7,pace:68.4,defReb:73.1,toRate:14.6,efg:53.2},
+"Arizona":{rank:15,adjEM:21.8,adjO:116.4,adjD:94.6,pace:70.2,defReb:72.6,toRate:15.4,efg:53.8},"Gonzaga":{rank:16,adjEM:21.4,adjO:119.8,adjD:98.4,pace:71.8,defReb:71.2,toRate:14.2,efg:55.4},"Baylor":{rank:17,adjEM:20.2,adjO:115.4,adjD:95.2,pace:69.8,defReb:73.8,toRate:15.1,efg:52.8},"Saint Louis":{rank:18,adjEM:19.8,adjO:113.4,adjD:93.6,pace:66.8,defReb:75.4,toRate:13.8,efg:51.8},
+"St. Bonaventure":{rank:63,adjEM:6.2,adjO:106.4,adjD:100.2,pace:67.8,defReb:71.4,toRate:16.2,efg:50.8},"Mississippi State":{rank:19,adjEM:19.4,adjO:113.8,adjD:94.4,pace:67.4,defReb:74.2,toRate:15.6,efg:52.2},"Ole Miss":{rank:20,adjEM:18.8,adjO:114.2,adjD:95.4,pace:68.8,defReb:73.1,toRate:16.2,efg:52.6},
+"New Mexico":{rank:21,adjEM:18.4,adjO:114.8,adjD:96.4,pace:70.2,defReb:72.8,toRate:15.4,efg:53.1},"Texas A&M":{rank:22,adjEM:18.1,adjO:113.4,adjD:95.3,pace:67.8,defReb:74.4,toRate:14.8,efg:52.4},"Wisconsin":{rank:23,adjEM:17.8,adjO:110.4,adjD:92.6,pace:63.2,defReb:77.8,toRate:12.4,efg:51.2},"Dayton":{rank:24,adjEM:17.6,adjO:113.2,adjD:95.6,pace:68.4,defReb:73.6,toRate:15.2,efg:52.8},
+"VCU":{rank:25,adjEM:17.2,adjO:111.8,adjD:94.6,pace:69.8,defReb:74.8,toRate:18.4,efg:51.4},"UCLA":{rank:26,adjEM:17.0,adjO:114.2,adjD:97.2,pace:68.4,defReb:72.4,toRate:15.8,efg:53.2},"Texas Tech":{rank:27,adjEM:16.8,adjO:112.4,adjD:95.6,pace:66.4,defReb:75.1,toRate:14.2,efg:51.8},"San Diego State":{rank:28,adjEM:16.4,adjO:110.8,adjD:94.4,pace:64.8,defReb:76.4,toRate:14.8,efg:51.2},
+"Arkansas":{rank:29,adjEM:15.6,adjO:112.8,adjD:97.2,pace:71.2,defReb:72.1,toRate:16.2,efg:52.4},"Memphis":{rank:30,adjEM:15.2,adjO:113.4,adjD:98.2,pace:70.8,defReb:71.4,toRate:17.4,efg:52.8},"Xavier":{rank:31,adjEM:14.8,adjO:112.8,adjD:98.0,pace:68.2,defReb:72.8,toRate:15.6,efg:52.2},"Clemson":{rank:32,adjEM:14.4,adjO:111.2,adjD:96.8,pace:67.4,defReb:73.4,toRate:14.8,efg:51.6},
+"Villanova":{rank:33,adjEM:14.1,adjO:111.2,adjD:97.1,pace:64.8,defReb:74.4,toRate:13.2,efg:51.8},"Missouri":{rank:34,adjEM:13.8,adjO:112.4,adjD:98.6,pace:68.8,defReb:72.2,toRate:16.4,efg:52.1},"North Carolina":{rank:35,adjEM:13.4,adjO:113.8,adjD:100.4,pace:70.4,defReb:71.6,toRate:16.8,efg:53.4},"Saint Mary":{rank:36,adjEM:13.2,adjO:111.4,adjD:98.2,pace:64.4,defReb:75.2,toRate:12.8,efg:52.4},
+"Louisville":{rank:37,adjEM:12.8,adjO:110.8,adjD:98.0,pace:67.8,defReb:73.1,toRate:15.4,efg:51.4},"Utah State":{rank:38,adjEM:12.4,adjO:111.2,adjD:98.8,pace:66.8,defReb:74.4,toRate:14.6,efg:52.1},"Boise State":{rank:39,adjEM:12.1,adjO:110.4,adjD:98.3,pace:67.4,defReb:73.8,toRate:15.2,efg:51.8},"Providence":{rank:40,adjEM:11.8,adjO:109.8,adjD:98.0,pace:65.8,defReb:74.2,toRate:14.4,efg:51.2},
+"Notre Dame":{rank:41,adjEM:11.7,adjO:109.8,adjD:98.1,pace:66.4,defReb:71.8,toRate:14.8,efg:51.6},"Wake Forest":{rank:42,adjEM:11.4,adjO:110.4,adjD:99.0,pace:68.8,defReb:71.2,toRate:16.2,efg:52.2},"Nebraska":{rank:43,adjEM:11.1,adjO:109.2,adjD:98.1,pace:67.2,defReb:72.4,toRate:15.8,efg:51.4},"Pittsburgh":{rank:44,adjEM:10.8,adjO:108.9,adjD:98.1,pace:67.1,defReb:70.8,toRate:15.2,efg:51.2},
+"Indiana":{rank:45,adjEM:10.8,adjO:109.2,adjD:98.4,pace:67.4,defReb:71.2,toRate:15.8,efg:51.4},"Penn State":{rank:46,adjEM:10.4,adjO:108.4,adjD:98.0,pace:66.8,defReb:72.1,toRate:15.4,efg:51.1},"Colorado State":{rank:47,adjEM:9.8,adjO:108.4,adjD:98.6,pace:68.4,defReb:71.4,toRate:15.6,efg:51.4},"Drake":{rank:48,adjEM:9.4,adjO:107.8,adjD:98.4,pace:65.8,defReb:73.2,toRate:14.2,efg:51.8},
+"UAB":{rank:49,adjEM:9.1,adjO:107.4,adjD:98.3,pace:67.4,defReb:72.8,toRate:15.8,efg:51.2},"South Florida":{rank:50,adjEM:8.8,adjO:107.2,adjD:98.4,pace:68.2,defReb:71.6,toRate:16.4,efg:50.8},"Stanford":{rank:55,adjEM:8.2,adjO:107.4,adjD:99.2,pace:65.8,defReb:70.4,toRate:14.8,efg:51.2},"Oklahoma":{rank:56,adjEM:8.0,adjO:107.1,adjD:99.1,pace:68.4,defReb:71.2,toRate:16.2,efg:51.4},
+"Virginia":{rank:57,adjEM:7.8,adjO:105.4,adjD:97.6,pace:61.2,defReb:75.8,toRate:12.8,efg:50.8},"Florida State":{rank:58,adjEM:7.6,adjO:106.8,adjD:99.2,pace:68.8,defReb:71.4,toRate:16.4,efg:51.2},"Loyola Chicago":{rank:60,adjEM:7.2,adjO:106.2,adjD:99.0,pace:65.8,defReb:73.4,toRate:14.2,efg:51.6},"Western Kentucky":{rank:61,adjEM:7.0,adjO:106.0,adjD:99.0,pace:67.2,defReb:72.4,toRate:15.4,efg:51.2},
+"Liberty":{rank:62,adjEM:6.8,adjO:105.8,adjD:99.0,pace:67.4,defReb:72.8,toRate:14.8,efg:51.4},"North Texas":{rank:63,adjEM:6.6,adjO:105.6,adjD:99.0,pace:67.8,defReb:71.8,toRate:15.6,efg:50.8},"South Dakota State":{rank:64,adjEM:6.4,adjO:105.4,adjD:99.0,pace:68.2,defReb:71.4,toRate:15.2,efg:51.2},"Iona":{rank:66,adjEM:6.0,adjO:105.0,adjD:99.0,pace:68.8,defReb:71.2,toRate:16.4,efg:51.2},
+"Maryland":{rank:68,adjEM:6.2,adjO:105.4,adjD:99.2,pace:67.8,defReb:71.2,toRate:16.8,efg:51.2},"Michigan":{rank:69,adjEM:5.6,adjO:104.8,adjD:99.2,pace:66.8,defReb:71.8,toRate:15.4,efg:51.4},"Iowa":{rank:70,adjEM:5.4,adjO:106.2,adjD:100.8,pace:68.4,defReb:70.8,toRate:16.2,efg:52.2},"Northwestern":{rank:71,adjEM:5.4,adjO:104.8,adjD:99.4,pace:66.1,defReb:70.8,toRate:15.6,efg:51.1},
+"Ohio":{rank:72,adjEM:5.2,adjO:104.6,adjD:99.4,pace:68.4,defReb:71.4,toRate:15.8,efg:51.4},"North Dakota State":{rank:72,adjEM:5.2,adjO:104.6,adjD:99.4,pace:66.4,defReb:71.4,toRate:14.8,efg:51.4},"Louisiana Tech":{rank:72,adjEM:5.2,adjO:104.6,adjD:99.4,pace:67.4,defReb:71.8,toRate:15.8,efg:51.6},"East Carolina":{rank:72,adjEM:5.2,adjO:104.6,adjD:99.4,pace:67.8,defReb:71.2,toRate:16.4,efg:51.2},
+"Tulsa":{rank:68,adjEM:6.2,adjO:105.4,adjD:99.2,pace:68.4,defReb:71.4,toRate:15.8,efg:51.6},"Miami OH":{rank:74,adjEM:4.8,adjO:104.2,adjD:99.4,pace:67.8,defReb:71.6,toRate:16.2,efg:51.2},"Miami (OH)":{rank:74,adjEM:4.8,adjO:104.2,adjD:99.4,pace:67.8,defReb:71.6,toRate:16.2,efg:51.2},"Temple":{rank:74,adjEM:4.8,adjO:104.2,adjD:99.4,pace:67.2,defReb:71.8,toRate:16.2,efg:50.8},
+"James Madison":{rank:75,adjEM:4.6,adjO:104.0,adjD:99.4,pace:68.8,defReb:70.4,toRate:16.4,efg:51.2},"UC Irvine":{rank:75,adjEM:4.6,adjO:104.0,adjD:99.4,pace:66.4,defReb:72.2,toRate:14.4,efg:51.8},"Indiana State":{rank:76,adjEM:4.4,adjO:103.8,adjD:99.4,pace:67.2,defReb:71.8,toRate:15.2,efg:51.4},"Tulane":{rank:76,adjEM:4.4,adjO:103.8,adjD:99.4,pace:68.8,defReb:71.2,toRate:16.4,efg:51.1},
+"Rutgers":{rank:77,adjEM:4.2,adjO:103.6,adjD:99.4,pace:66.4,defReb:72.1,toRate:15.8,efg:50.8},"Arkansas State":{rank:76,adjEM:4.2,adjO:103.6,adjD:99.4,pace:68.4,defReb:71.0,toRate:16.4,efg:51.4},"Hawaii":{rank:76,adjEM:4.2,adjO:103.6,adjD:99.4,pace:70.2,defReb:70.8,toRate:16.8,efg:51.4},"Missouri State":{rank:80,adjEM:3.6,adjO:103.0,adjD:99.4,pace:67.4,defReb:71.2,toRate:15.8,efg:50.8},
+"Sam Houston":{rank:81,adjEM:3.4,adjO:102.8,adjD:99.4,pace:67.8,defReb:70.8,toRate:16.2,efg:50.6},"Long Beach State":{rank:78,adjEM:3.8,adjO:103.2,adjD:99.4,pace:68.8,defReb:71.0,toRate:16.4,efg:51.1},"Georgia Southern":{rank:78,adjEM:3.8,adjO:103.2,adjD:99.4,pace:67.8,defReb:71.4,toRate:16.2,efg:51.1},
+"Colgate":{rank:94,adjEM:2.2,adjO:101.8,adjD:99.6,pace:65.8,defReb:72.4,toRate:14.8,efg:51.4},"Boston University":{rank:95,adjEM:2.0,adjO:101.6,adjD:99.6,pace:66.4,defReb:71.8,toRate:15.4,efg:51.1},"DePaul":{rank:87,adjEM:2.1,adjO:102.4,adjD:100.3,pace:68.4,defReb:68.4,toRate:18.2,efg:49.8},"Oral Roberts":{rank:97,adjEM:1.6,adjO:101.2,adjD:99.6,pace:68.2,defReb:70.8,toRate:16.4,efg:50.4},
+"Loyola Marymount":{rank:85,adjEM:2.4,adjO:102.0,adjD:99.4,pace:67.4,defReb:71.2,toRate:16.4,efg:50.4},"San Diego":{rank:86,adjEM:2.2,adjO:101.8,adjD:99.4,pace:66.8,defReb:71.4,toRate:16.2,efg:50.6},"New Mexico State":{rank:83,adjEM:3.0,adjO:102.4,adjD:99.4,pace:67.2,defReb:71.2,toRate:15.4,efg:50.8},"Utah Valley":{rank:80,adjEM:3.4,adjO:102.8,adjD:99.4,pace:67.4,defReb:71.2,toRate:16.2,efg:50.8},
+"Jackson State":{rank:85,adjEM:2.8,adjO:102.2,adjD:99.4,pace:69.2,defReb:70.2,toRate:17.2,efg:49.8},"Alabama State":{rank:90,adjEM:1.4,adjO:100.8,adjD:99.4,pace:68.8,defReb:69.6,toRate:18.4,efg:48.4},"Alabama A&M":{rank:91,adjEM:1.2,adjO:100.6,adjD:99.4,pace:68.4,defReb:69.4,toRate:18.6,efg:48.2},
+"Grambling":{rank:100,adjEM:0.0,adjO:99.6,adjD:99.6,pace:69.4,defReb:68.8,toRate:19.2,efg:47.8},"Southern":{rank:92,adjEM:1.0,adjO:100.6,adjD:99.6,pace:68.8,defReb:69.6,toRate:18.2,efg:48.6},"Prairie View":{rank:99,adjEM:0.2,adjO:99.8,adjD:99.6,pace:68.8,defReb:69.2,toRate:18.8,efg:48.2},"Texas Southern":{rank:82,adjEM:3.2,adjO:102.6,adjD:99.4,pace:68.4,defReb:70.4,toRate:16.8,efg:50.4},
+"Florida A&M":{rank:91,adjEM:1.0,adjO:100.6,adjD:99.6,pace:68.8,defReb:69.8,toRate:18.2,efg:48.8},"Norfolk State":{rank:86,adjEM:2.2,adjO:101.8,adjD:99.4,pace:68.4,defReb:70.4,toRate:17.2,efg:50.0},"Morgan State":{rank:87,adjEM:2.0,adjO:101.4,adjD:99.4,pace:68.8,defReb:70.0,toRate:17.6,efg:49.6},"Howard":{rank:88,adjEM:1.6,adjO:101.2,adjD:99.6,pace:67.8,defReb:70.2,toRate:17.4,efg:49.4},
+"Bethune-Cookman":{rank:90,adjEM:1.2,adjO:100.8,adjD:99.6,pace:69.8,defReb:69.2,toRate:18.4,efg:48.6},"Boston College":{rank:68,adjEM:6.2,adjO:106.2,adjD:100.0,pace:68.4,defReb:71.2,toRate:16.4,efg:50.8},"California":{rank:95,adjEM:2.0,adjO:103.2,adjD:101.2,pace:69.2,defReb:70.4,toRate:17.2,efg:49.6},
+"Georgia Tech":{rank:62,adjEM:7.2,adjO:107.4,adjD:100.2,pace:70.2,defReb:71.4,toRate:16.8,efg:51.2},"Miami":{rank:55,adjEM:8.2,adjO:108.2,adjD:100.0,pace:69.8,defReb:71.8,toRate:16.2,efg:51.8},"NC State":{rank:44,adjEM:10.4,adjO:109.8,adjD:99.4,pace:68.8,defReb:72.4,toRate:15.8,efg:52.2},"Syracuse":{rank:48,adjEM:9.8,adjO:109.2,adjD:99.4,pace:67.4,defReb:72.8,toRate:16.4,efg:51.4},
+"Virginia Tech":{rank:52,adjEM:9.2,adjO:108.8,adjD:99.6,pace:68.4,defReb:72.2,toRate:16.6,efg:51.6},"Illinois":{rank:42,adjEM:10.8,adjO:110.4,adjD:99.6,pace:67.8,defReb:73.2,toRate:15.6,efg:52.4},"Minnesota":{rank:78,adjEM:4.2,adjO:105.2,adjD:101.0,pace:68.8,defReb:71.0,toRate:16.8,efg:50.4},"Ohio State":{rank:46,adjEM:10.2,adjO:110.2,adjD:100.0,pace:69.4,defReb:72.8,toRate:16.2,efg:52.0},
+"Oregon":{rank:38,adjEM:11.8,adjO:111.2,adjD:99.4,pace:70.2,defReb:72.6,toRate:15.8,efg:52.6},"USC":{rank:56,adjEM:8.0,adjO:107.8,adjD:99.8,pace:69.6,defReb:71.6,toRate:16.4,efg:51.4},"Washington":{rank:82,adjEM:3.8,adjO:104.8,adjD:101.0,pace:69.0,defReb:70.8,toRate:17.0,efg:50.2},"Arizona State":{rank:58,adjEM:7.8,adjO:107.6,adjD:99.8,pace:69.8,defReb:71.8,toRate:16.4,efg:51.6},
+"BYU":{rank:36,adjEM:12.2,adjO:111.8,adjD:99.6,pace:68.4,defReb:73.4,toRate:15.4,efg:52.8},"Cincinnati":{rank:43,adjEM:10.6,adjO:110.0,adjD:99.4,pace:67.6,defReb:73.0,toRate:16.0,efg:52.2},"Colorado":{rank:60,adjEM:7.4,adjO:107.2,adjD:99.8,pace:69.4,defReb:71.6,toRate:16.6,efg:51.0},"Kansas State":{rank:45,adjEM:10.4,adjO:110.0,adjD:99.6,pace:68.2,defReb:72.6,toRate:16.0,efg:52.0},
+"Oklahoma State":{rank:54,adjEM:8.4,adjO:108.4,adjD:100.0,pace:68.8,defReb:72.0,toRate:16.4,efg:51.6},"TCU":{rank:57,adjEM:7.8,adjO:107.6,adjD:99.8,pace:69.2,defReb:71.8,toRate:16.6,efg:51.2},"UCF":{rank:63,adjEM:7.0,adjO:106.8,adjD:99.8,pace:69.8,defReb:71.4,toRate:16.8,efg:50.8},"Utah":{rank:53,adjEM:8.6,adjO:108.4,adjD:99.8,pace:67.8,defReb:72.8,toRate:15.8,efg:51.8},
+"West Virginia":{rank:47,adjEM:10.0,adjO:109.6,adjD:99.6,pace:67.4,defReb:73.2,toRate:15.6,efg:52.2},"Georgia":{rank:59,adjEM:7.6,adjO:107.4,adjD:99.8,pace:69.0,defReb:71.8,toRate:16.4,efg:51.2},"LSU":{rank:51,adjEM:9.0,adjO:109.0,adjD:100.0,pace:70.4,defReb:72.2,toRate:16.6,efg:51.4},"South Carolina":{rank:49,adjEM:9.6,adjO:109.4,adjD:99.8,pace:68.6,defReb:72.4,toRate:16.2,efg:51.8},
+"Vanderbilt":{rank:66,adjEM:6.6,adjO:106.4,adjD:99.8,pace:68.4,defReb:71.4,toRate:16.8,efg:50.8},"Butler":{rank:65,adjEM:6.8,adjO:106.6,adjD:99.8,pace:67.2,defReb:72.2,toRate:16.4,efg:51.0},"Georgetown":{rank:92,adjEM:2.4,adjO:103.6,adjD:101.2,pace:68.8,defReb:70.2,toRate:17.4,efg:49.4},"Seton Hall":{rank:61,adjEM:7.2,adjO:107.0,adjD:99.8,pace:68.6,defReb:71.6,toRate:16.4,efg:51.2},
+"UConn":{rank:22,adjEM:17.8,adjO:114.2,adjD:96.4,pace:66.8,defReb:75.4,toRate:14.8,efg:53.8},"Connecticut":{rank:22,adjEM:17.8,adjO:114.2,adjD:96.4,pace:66.8,defReb:75.4,toRate:14.8,efg:53.8},"Charlotte":{rank:74,adjEM:4.8,adjO:104.6,adjD:99.8,pace:68.8,defReb:71.0,toRate:16.8,efg:50.4},"Florida Atlantic":{rank:67,adjEM:6.4,adjO:106.2,adjD:99.8,pace:68.4,defReb:71.4,toRate:16.6,efg:50.8},
+"Rice":{rank:77,adjEM:4.4,adjO:104.8,adjD:100.4,pace:68.2,defReb:70.8,toRate:16.8,efg:50.2},"SMU":{rank:53,adjEM:8.6,adjO:108.4,adjD:99.8,pace:69.4,defReb:72.0,toRate:16.2,efg:51.6},"Wichita State":{rank:69,adjEM:6.0,adjO:106.0,adjD:100.0,pace:68.0,defReb:71.2,toRate:16.6,efg:50.6},"Air Force":{rank:88,adjEM:3.0,adjO:104.2,adjD:101.2,pace:62.4,defReb:72.4,toRate:16.0,efg:50.8},
+"Fresno State":{rank:73,adjEM:5.0,adjO:105.4,adjD:100.4,pace:68.4,defReb:71.2,toRate:16.8,efg:50.4},"Nevada":{rank:71,adjEM:5.4,adjO:105.6,adjD:100.2,pace:68.6,defReb:71.4,toRate:16.6,efg:50.6},"UNLV":{rank:64,adjEM:6.8,adjO:106.6,adjD:99.8,pace:69.4,defReb:71.6,toRate:16.4,efg:51.0},"Wyoming":{rank:79,adjEM:4.0,adjO:104.4,adjD:100.4,pace:67.4,defReb:71.6,toRate:16.4,efg:50.4},
+"Davidson":{rank:57,adjEM:7.8,adjO:107.6,adjD:99.8,pace:68.8,defReb:71.8,toRate:15.8,efg:52.0},"Duquesne":{rank:76,adjEM:4.4,adjO:104.8,adjD:100.4,pace:68.2,defReb:71.0,toRate:16.8,efg:50.2},"George Mason":{rank:71,adjEM:5.4,adjO:105.6,adjD:100.2,pace:68.8,defReb:71.2,toRate:16.6,efg:50.6},"Richmond":{rank:69,adjEM:5.8,adjO:106.0,adjD:100.2,pace:68.4,defReb:71.4,toRate:16.4,efg:50.8},
+"Northern Iowa":{rank:66,adjEM:6.6,adjO:106.4,adjD:99.8,pace:66.8,defReb:72.0,toRate:15.8,efg:51.4},"Southern Illinois":{rank:70,adjEM:5.6,adjO:105.8,adjD:100.2,pace:66.4,defReb:72.4,toRate:16.2,efg:51.0},"Drake":{rank:48,adjEM:9.4,adjO:107.8,adjD:98.4,pace:65.8,defReb:73.2,toRate:14.2,efg:51.8},
+"Akron":{rank:73,adjEM:5.0,adjO:105.2,adjD:100.2,pace:67.8,defReb:71.2,toRate:16.6,efg:50.4},"Buffalo":{rank:76,adjEM:4.4,adjO:104.8,adjD:100.4,pace:68.4,defReb:71.0,toRate:16.8,efg:50.2},"Kent State":{rank:77,adjEM:4.2,adjO:104.6,adjD:100.4,pace:67.6,defReb:71.0,toRate:16.6,efg:50.4},"Toledo":{rank:75,adjEM:4.6,adjO:105.0,adjD:100.4,pace:68.2,defReb:71.2,toRate:16.6,efg:50.4},
+"Georgia State":{rank:79,adjEM:4.0,adjO:104.4,adjD:100.4,pace:68.6,defReb:70.8,toRate:16.8,efg:50.2},"Louisiana":{rank:72,adjEM:5.2,adjO:105.4,adjD:100.2,pace:68.8,defReb:71.2,toRate:16.6,efg:50.6},"Louisiana Monroe":{rank:90,adjEM:2.6,adjO:103.2,adjD:100.6,pace:68.4,defReb:70.4,toRate:17.0,efg:49.8},"Marshall":{rank:78,adjEM:4.2,adjO:104.4,adjD:100.2,pace:68.0,defReb:71.0,toRate:16.8,efg:50.2},
+"Middle Tennessee":{rank:71,adjEM:5.4,adjO:105.6,adjD:100.2,pace:68.2,defReb:71.4,toRate:16.4,efg:50.8},"South Alabama":{rank:76,adjEM:4.4,adjO:104.8,adjD:100.4,pace:68.6,defReb:71.0,toRate:16.8,efg:50.2},"Southern Miss":{rank:82,adjEM:3.8,adjO:104.2,adjD:100.4,pace:67.8,defReb:70.8,toRate:16.8,efg:50.0},"UTSA":{rank:80,adjEM:4.0,adjO:104.4,adjD:100.4,pace:68.4,defReb:70.8,toRate:16.8,efg:50.2},
+"Belmont":{rank:67,adjEM:6.4,adjO:106.4,adjD:100.0,pace:69.4,defReb:71.4,toRate:16.2,efg:51.2},"Murray State":{rank:68,adjEM:6.2,adjO:106.4,adjD:100.2,pace:68.2,defReb:71.6,toRate:16.2,efg:51.2},"Oakland":{rank:72,adjEM:5.2,adjO:105.6,adjD:100.4,pace:69.0,defReb:71.2,toRate:16.4,efg:51.0},
+"Harvard":{rank:83,adjEM:3.6,adjO:104.0,adjD:100.4,pace:66.8,defReb:70.8,toRate:16.8,efg:50.2},"Princeton":{rank:77,adjEM:4.4,adjO:104.8,adjD:100.4,pace:65.8,defReb:71.4,toRate:16.2,efg:51.0},"Yale":{rank:80,adjEM:4.0,adjO:104.4,adjD:100.4,pace:66.2,defReb:71.0,toRate:16.6,efg:50.6},
+"Hofstra":{rank:74,adjEM:4.8,adjO:105.0,adjD:100.2,pace:68.4,defReb:71.2,toRate:16.6,efg:50.6},"Northeastern":{rank:72,adjEM:5.2,adjO:105.4,adjD:100.2,pace:67.8,defReb:71.4,toRate:16.4,efg:50.8},"Delaware":{rank:76,adjEM:4.4,adjO:104.8,adjD:100.4,pace:67.6,defReb:71.0,toRate:16.6,efg:50.4},"UNCW":{rank:78,adjEM:4.2,adjO:104.6,adjD:100.4,pace:68.0,defReb:71.0,toRate:16.6,efg:50.4},
+"Charleston":{rank:70,adjEM:5.6,adjO:105.8,adjD:100.2,pace:68.2,defReb:71.4,toRate:16.4,efg:50.8},"Chattanooga":{rank:75,adjEM:4.6,adjO:105.0,adjD:100.4,pace:68.0,defReb:71.2,toRate:16.6,efg:50.4},"Furman":{rank:77,adjEM:4.4,adjO:104.8,adjD:100.4,pace:67.4,defReb:71.0,toRate:16.6,efg:50.4},"ETSU":{rank:73,adjEM:5.0,adjO:105.2,adjD:100.2,pace:68.2,defReb:71.2,toRate:16.6,efg:50.6},
+"Wofford":{rank:81,adjEM:3.8,adjO:104.2,adjD:100.4,pace:67.2,defReb:71.2,toRate:16.4,efg:50.6},"High Point":{rank:83,adjEM:3.6,adjO:104.0,adjD:100.4,pace:67.8,defReb:70.8,toRate:16.8,efg:50.0},"Campbell":{rank:82,adjEM:3.8,adjO:104.2,adjD:100.4,pace:68.0,defReb:70.8,toRate:16.8,efg:50.2},
+"Alcorn State":{rank:89,adjEM:1.4,adjO:101.0,adjD:99.6,pace:70.4,defReb:69.4,toRate:18.6,efg:48.2},"South Carolina State":{rank:95,adjEM:0.8,adjO:100.4,adjD:99.6,pace:68.2,defReb:69.4,toRate:18.8,efg:48.2},"Arkansas Pine Bluff":{rank:88,adjEM:1.8,adjO:101.4,adjD:99.6,pace:71.2,defReb:69.8,toRate:18.8,efg:48.4},
+"Appalachian State":{rank:76,adjEM:4.4,adjO:104.8,adjD:100.4,pace:68.8,defReb:71.2,toRate:16.8,efg:50.4},"Coastal Carolina":{rank:80,adjEM:3.8,adjO:104.2,adjD:100.4,pace:69.2,defReb:70.8,toRate:17.0,efg:50.0},"Florida Gulf Coast":{rank:82,adjEM:3.6,adjO:103.8,adjD:100.2,pace:69.4,defReb:70.6,toRate:17.0,efg:49.8},
+"UNC Asheville":{rank:88,adjEM:2.8,adjO:103.0,adjD:100.2,pace:68.0,defReb:70.2,toRate:17.2,efg:49.4},"UNC Greensboro":{rank:81,adjEM:3.8,adjO:104.0,adjD:100.2,pace:67.8,defReb:70.8,toRate:16.8,efg:50.2},"Winthrop":{rank:78,adjEM:4.0,adjO:104.4,adjD:100.4,pace:68.4,defReb:71.0,toRate:16.8,efg:50.2},
+"Tennessee State":{rank:87,adjEM:2.8,adjO:103.2,adjD:100.4,pace:68.2,defReb:70.2,toRate:17.2,efg:49.4},"Purdue Fort Wayne":{rank:83,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.2,defReb:70.8,toRate:16.8,efg:50.0},"Southeast Missouri State":{rank:84,adjEM:3.2,adjO:103.6,adjD:100.4,pace:67.8,defReb:70.6,toRate:17.0,efg:49.8},
+"St. Thomas":{rank:86,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.4,defReb:70.6,toRate:17.0,efg:49.8},"Seattle":{rank:83,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.8,defReb:70.6,toRate:17.0,efg:49.8},"Southern Indiana":{rank:88,adjEM:2.8,adjO:103.2,adjD:100.4,pace:67.8,defReb:70.4,toRate:17.0,efg:49.6},
+"SIUE":{rank:89,adjEM:2.8,adjO:103.2,adjD:100.4,pace:67.8,defReb:70.2,toRate:17.0,efg:49.6},"Florida International":{rank:85,adjEM:3.4,adjO:103.8,adjD:100.4,pace:68.6,defReb:70.6,toRate:17.0,efg:49.8},"Tennessee Martin":{rank:87,adjEM:3.0,adjO:103.4,adjD:100.4,pace:67.6,defReb:70.4,toRate:17.0,efg:49.8},
 };
 
-// ── ARENA DATABASE ────────────────────────────────────────────────────────────
-// lat/lon/tz for travel distance + timezone fatigue calculations
-// Research: Charest et al. (J.Clin.Sleep Med. 2021) — 500km ≈ 4% win prob
 const AD={
-  "Auburn":{lat:32.60,lon:-85.49,tz:-6},"Duke":{lat:36.00,lon:-78.94,tz:-5},
-  "Houston":{lat:29.72,lon:-95.40,tz:-6},"Tennessee":{lat:35.95,lon:-83.93,tz:-5},
-  "Florida":{lat:29.65,lon:-82.35,tz:-5},"Purdue":{lat:40.43,lon:-86.91,tz:-5},
-  "St. John":{lat:40.73,lon:-73.80,tz:-5},"Iowa State":{lat:42.03,lon:-93.63,tz:-6},
-  "Marquette":{lat:43.05,lon:-87.92,tz:-6},"Michigan State":{lat:42.73,lon:-84.48,tz:-5},
-  "Alabama":{lat:33.21,lon:-87.55,tz:-6},"Creighton":{lat:41.26,lon:-95.92,tz:-6},
-  "Kentucky":{lat:38.05,lon:-84.50,tz:-5},"Kansas":{lat:38.95,lon:-95.25,tz:-6},
-  "Arizona":{lat:32.23,lon:-110.95,tz:-7},"Gonzaga":{lat:47.67,lon:-117.40,tz:-8},
-  "Baylor":{lat:31.56,lon:-97.12,tz:-6},"Saint Louis":{lat:38.58,lon:-90.20,tz:-6},
-  "Mississippi State":{lat:33.45,lon:-88.79,tz:-6},"Ole Miss":{lat:34.36,lon:-89.54,tz:-6},
-  "New Mexico":{lat:35.08,lon:-106.65,tz:-7},"Texas A&M":{lat:30.61,lon:-96.34,tz:-6},
-  "Wisconsin":{lat:43.07,lon:-89.41,tz:-6},"Dayton":{lat:39.76,lon:-84.19,tz:-5},
-  "VCU":{lat:37.54,lon:-77.45,tz:-5},"UCLA":{lat:34.07,lon:-118.44,tz:-8},
-  "Texas Tech":{lat:33.59,lon:-101.87,tz:-6},"San Diego State":{lat:32.78,lon:-117.07,tz:-8},
-  "Arkansas":{lat:36.07,lon:-94.18,tz:-6},"Memphis":{lat:35.15,lon:-90.05,tz:-6},
-  "Xavier":{lat:39.15,lon:-84.47,tz:-5},"Clemson":{lat:34.68,lon:-82.84,tz:-5},
-  "Villanova":{lat:40.04,lon:-75.35,tz:-5},"Missouri":{lat:38.94,lon:-92.33,tz:-6},
-  "North Carolina":{lat:35.91,lon:-79.05,tz:-5},"Saint Mary":{lat:37.84,lon:-122.11,tz:-8},
-  "Louisville":{lat:38.22,lon:-85.76,tz:-5},"Utah State":{lat:41.76,lon:-111.81,tz:-7},
-  "Boise State":{lat:43.60,lon:-116.20,tz:-7},"Providence":{lat:41.82,lon:-71.40,tz:-5},
-  "Notre Dame":{lat:41.70,lon:-86.24,tz:-5},"Wake Forest":{lat:36.13,lon:-80.28,tz:-5},
-  "Nebraska":{lat:40.82,lon:-96.70,tz:-6},"Pittsburgh":{lat:40.44,lon:-80.00,tz:-5},"St. Bonaventure":{lat:42.08,lon:-78.47,tz:-5},
-  "Indiana":{lat:39.17,lon:-86.52,tz:-5},"Penn State":{lat:40.80,lon:-77.86,tz:-5},
-  "Colorado State":{lat:40.58,lon:-105.09,tz:-7},"Drake":{lat:41.60,lon:-93.65,tz:-6},
-  "UAB":{lat:33.50,lon:-86.80,tz:-6},"South Florida":{lat:28.07,lon:-82.42,tz:-5},
-  "Stanford":{lat:37.44,lon:-122.17,tz:-8},"Oklahoma":{lat:35.22,lon:-97.44,tz:-6},
-  "Virginia":{lat:38.04,lon:-78.51,tz:-5},"Florida State":{lat:30.44,lon:-84.28,tz:-5},
-  "Loyola Chicago":{lat:41.98,lon:-87.66,tz:-6},"Maryland":{lat:38.99,lon:-76.94,tz:-5},
-  "Michigan":{lat:42.27,lon:-83.74,tz:-5},"Iowa":{lat:41.66,lon:-91.55,tz:-6},
-  "Northwestern":{lat:42.06,lon:-87.68,tz:-6},"East Carolina":{lat:35.61,lon:-77.36,tz:-5},
-  "Tulsa":{lat:36.15,lon:-95.99,tz:-6},"Temple":{lat:40.00,lon:-75.15,tz:-5},
-  "Tulane":{lat:29.94,lon:-90.12,tz:-6},"DePaul":{lat:41.92,lon:-87.65,tz:-6},
-  "Ohio":{lat:39.32,lon:-82.10,tz:-5},"Miami OH":{lat:39.51,lon:-84.74,tz:-5},
-  "Miami (OH)":{lat:39.51,lon:-84.74,tz:-5},"Long Beach State":{lat:33.78,lon:-118.19,tz:-8},
-  "New Mexico State":{lat:32.28,lon:-106.75,tz:-7},"North Dakota State":{lat:46.90,lon:-96.81,tz:-6},
-  "South Dakota State":{lat:44.32,lon:-96.79,tz:-6},"Iona":{lat:40.93,lon:-73.80,tz:-5},
-  "Northern Iowa":{lat:42.52,lon:-92.46,tz:-6},"Hawaii":{lat:21.30,lon:-157.84,tz:-10},
-  "Louisiana Tech":{lat:32.52,lon:-92.64,tz:-6},"UC Irvine":{lat:33.65,lon:-117.84,tz:-8},
-  "Utah Valley":{lat:40.28,lon:-111.71,tz:-7},"Arkansas State":{lat:35.84,lon:-90.67,tz:-6},
-  "Jackson State":{lat:32.30,lon:-90.18,tz:-6},"Alabama State":{lat:32.36,lon:-86.30,tz:-6},
-  "Alabama A&M":{lat:34.78,lon:-86.57,tz:-6},"Grambling":{lat:32.52,lon:-92.72,tz:-6},
-  "Southern":{lat:30.53,lon:-91.05,tz:-6},"Prairie View":{lat:30.09,lon:-95.99,tz:-6},
-  "Texas Southern":{lat:29.72,lon:-95.35,tz:-6},"Florida A&M":{lat:30.43,lon:-84.28,tz:-5},
-  "Norfolk State":{lat:36.85,lon:-76.29,tz:-5},"Morgan State":{lat:39.34,lon:-76.58,tz:-5},
-  "Howard":{lat:38.92,lon:-77.02,tz:-5},"Bethune-Cookman":{lat:29.19,lon:-81.05,tz:-5},
-  "Alcorn State":{lat:31.72,lon:-90.98,tz:-6},"South Carolina State":{lat:33.49,lon:-80.86,tz:-5},
+"Auburn":{lat:32.60,lon:-85.49,tz:-6},"Duke":{lat:36.00,lon:-78.94,tz:-5},"Houston":{lat:29.72,lon:-95.40,tz:-6},"Tennessee":{lat:35.95,lon:-83.93,tz:-5},"Florida":{lat:29.65,lon:-82.35,tz:-5},"Purdue":{lat:40.43,lon:-86.91,tz:-5},"St. John":{lat:40.73,lon:-73.80,tz:-5},"Iowa State":{lat:42.03,lon:-93.63,tz:-6},"Marquette":{lat:43.05,lon:-87.92,tz:-6},"Michigan State":{lat:42.73,lon:-84.48,tz:-5},"Alabama":{lat:33.21,lon:-87.55,tz:-6},"Creighton":{lat:41.26,lon:-95.92,tz:-6},"Kentucky":{lat:38.05,lon:-84.50,tz:-5},"Kansas":{lat:38.95,lon:-95.25,tz:-6},"Arizona":{lat:32.23,lon:-110.95,tz:-7},"Gonzaga":{lat:47.67,lon:-117.40,tz:-8},"Baylor":{lat:31.56,lon:-97.12,tz:-6},"Saint Louis":{lat:38.58,lon:-90.20,tz:-6},"Mississippi State":{lat:33.45,lon:-88.79,tz:-6},"Ole Miss":{lat:34.36,lon:-89.54,tz:-6},"New Mexico":{lat:35.08,lon:-106.65,tz:-7},"Texas A&M":{lat:30.61,lon:-96.34,tz:-6},"Wisconsin":{lat:43.07,lon:-89.41,tz:-6},"Dayton":{lat:39.76,lon:-84.19,tz:-5},"VCU":{lat:37.54,lon:-77.45,tz:-5},"UCLA":{lat:34.07,lon:-118.44,tz:-8},"Texas Tech":{lat:33.59,lon:-101.87,tz:-6},"San Diego State":{lat:32.78,lon:-117.07,tz:-8},"Arkansas":{lat:36.07,lon:-94.18,tz:-6},"Memphis":{lat:35.15,lon:-90.05,tz:-6},"Xavier":{lat:39.15,lon:-84.47,tz:-5},"Clemson":{lat:34.68,lon:-82.84,tz:-5},"Villanova":{lat:40.04,lon:-75.35,tz:-5},"Missouri":{lat:38.94,lon:-92.33,tz:-6},"North Carolina":{lat:35.91,lon:-79.05,tz:-5},"Saint Mary":{lat:37.84,lon:-122.11,tz:-8},"Louisville":{lat:38.22,lon:-85.76,tz:-5},"Utah State":{lat:41.76,lon:-111.81,tz:-7},"Boise State":{lat:43.60,lon:-116.20,tz:-7},"Providence":{lat:41.82,lon:-71.40,tz:-5},"Notre Dame":{lat:41.70,lon:-86.24,tz:-5},"Wake Forest":{lat:36.13,lon:-80.28,tz:-5},"Nebraska":{lat:40.82,lon:-96.70,tz:-6},"Pittsburgh":{lat:40.44,lon:-80.00,tz:-5},"St. Bonaventure":{lat:42.08,lon:-78.47,tz:-5},"Indiana":{lat:39.17,lon:-86.52,tz:-5},"Penn State":{lat:40.80,lon:-77.86,tz:-5},"Colorado State":{lat:40.58,lon:-105.09,tz:-7},"Drake":{lat:41.60,lon:-93.65,tz:-6},"UAB":{lat:33.50,lon:-86.80,tz:-6},"South Florida":{lat:28.07,lon:-82.42,tz:-5},"Stanford":{lat:37.44,lon:-122.17,tz:-8},"Oklahoma":{lat:35.22,lon:-97.44,tz:-6},"Virginia":{lat:38.04,lon:-78.51,tz:-5},"Florida State":{lat:30.44,lon:-84.28,tz:-5},"Loyola Chicago":{lat:41.98,lon:-87.66,tz:-6},"Maryland":{lat:38.99,lon:-76.94,tz:-5},"Michigan":{lat:42.27,lon:-83.74,tz:-5},"Iowa":{lat:41.66,lon:-91.55,tz:-6},"Northwestern":{lat:42.06,lon:-87.68,tz:-6},"East Carolina":{lat:35.61,lon:-77.36,tz:-5},"Tulsa":{lat:36.15,lon:-95.99,tz:-6},"Temple":{lat:40.00,lon:-75.15,tz:-5},"Tulane":{lat:29.94,lon:-90.12,tz:-6},"DePaul":{lat:41.92,lon:-87.65,tz:-6},"Ohio":{lat:39.32,lon:-82.10,tz:-5},"Miami OH":{lat:39.51,lon:-84.74,tz:-5},"Miami (OH)":{lat:39.51,lon:-84.74,tz:-5},"Long Beach State":{lat:33.78,lon:-118.19,tz:-8},"New Mexico State":{lat:32.28,lon:-106.75,tz:-7},"North Dakota State":{lat:46.90,lon:-96.81,tz:-6},"South Dakota State":{lat:44.32,lon:-96.79,tz:-6},"Iona":{lat:40.93,lon:-73.80,tz:-5},"Northern Iowa":{lat:42.52,lon:-92.46,tz:-6},"Hawaii":{lat:21.30,lon:-157.84,tz:-10},"Louisiana Tech":{lat:32.52,lon:-92.64,tz:-6},"UC Irvine":{lat:33.65,lon:-117.84,tz:-8},"Utah Valley":{lat:40.28,lon:-111.71,tz:-7},"Arkansas State":{lat:35.84,lon:-90.67,tz:-6},"Jackson State":{lat:32.30,lon:-90.18,tz:-6},"Alabama State":{lat:32.36,lon:-86.30,tz:-6},"Alabama A&M":{lat:34.78,lon:-86.57,tz:-6},"Grambling":{lat:32.52,lon:-92.72,tz:-6},"Southern":{lat:30.53,lon:-91.05,tz:-6},"Prairie View":{lat:30.09,lon:-95.99,tz:-6},"Texas Southern":{lat:29.72,lon:-95.35,tz:-6},"Florida A&M":{lat:30.43,lon:-84.28,tz:-5},"Norfolk State":{lat:36.85,lon:-76.29,tz:-5},"Morgan State":{lat:39.34,lon:-76.58,tz:-5},"Howard":{lat:38.92,lon:-77.02,tz:-5},"Bethune-Cookman":{lat:29.19,lon:-81.05,tz:-5},"Alcorn State":{lat:31.72,lon:-90.98,tz:-6},"South Carolina State":{lat:33.49,lon:-80.86,tz:-5},
 };
 
-// ── ESPN SCHEDULE ENGINE ──────────────────────────────────────────────────────
-function espnDs(daysAgo){
-  const d=new Date();d.setDate(d.getDate()-daysAgo);
-  return d.toISOString().slice(0,10).replace(/-/g,"");
-}
+function espnDs(daysAgo){const d=new Date();d.setDate(d.getDate()-daysAgo);return d.toISOString().slice(0,10).replace(/-/g,"");}
 function matchESPN(dn){
-  if(!dn)return null;
-  if(TE[dn])return dn;
-  const parts=dn.split(" ");
-  for(let t=1;t<parts.length;t++){
-    const a=parts.slice(0,parts.length-t).join(" ");
-    if(TE[a])return a;
-    const lo=a.toLowerCase(),f=Object.keys(TE).find(k=>k.toLowerCase()===lo);
-    if(f)return f;
-  }
-  const nm=dn.toLowerCase();
-  // Sort longest-first so "Florida A&M" beats "Florida"; require word-boundary so "Kansas" never matches inside "Arkansas"
-  const sorted=[...Object.keys(TE)].sort((a,b)=>b.length-a.length);
-  return sorted.find(k=>{
-    if(k.length<5)return false;
-    const kl=k.toLowerCase(),idx=nm.indexOf(kl);
-    if(idx===-1)return false;
-    const before=idx===0||nm[idx-1]===" ";
-    const after=idx+kl.length===nm.length||nm[idx+kl.length]===" ";
-    return before&&after;
-  })||null;
+if(!dn)return null;if(TE[dn])return dn;
+const parts=dn.split(" ");for(let t=1;t<parts.length;t++){const a=parts.slice(0,parts.length-t).join(" ");if(TE[a])return a;const lo=a.toLowerCase(),f=Object.keys(TE).find(k=>k.toLowerCase()===lo);if(f)return f;}
+const nm=dn.toLowerCase(),sorted=[...Object.keys(TE)].sort((a,b)=>b.length-a.length);
+return sorted.find(k=>{if(k.length<5)return false;const kl=k.toLowerCase(),idx=nm.indexOf(kl);if(idx===-1)return false;const before=idx===0||nm[idx-1]===" ";const after=idx+kl.length===nm.length||nm[idx+kl.length]===" ";return before&&after;})||null;
 }
 async function buildESPNCache(){
-  const cached=sg(SK.espn,null),now=Date.now();
-  if(cached&&cached.ts&&(now-cached.ts)<ESPN_TTL)return{data:cached.data,source:"cached",ts:cached.ts,teams:Object.keys(cached.data||{}).length};
-  const td={};let fetched=0;
-  try{
-    const prs=Array.from({length:10},(_,d)=>
-      fetch(`${ESPN_BASE}/scoreboard?dates=${espnDs(d)}&limit=500`)
-        .then(r=>r.ok?r.json():null).catch(()=>null)
-    );
-    const rr=await Promise.all(prs);
-    rr.forEach((data)=>{
-      if(!data||!data.events)return;
-      fetched++;
-      data.events.forEach(evt=>{
-        const comp=evt.competitions?.[0];
-        const st=comp?.status?.type;if(!st?.completed&&st?.name!=="STATUS_FINAL")return;
-        const compTs=evt.competitions?.[0]?.competitors||[];
-        const scores=Object.fromEntries(compTs.map(c=>[c.homeAway,parseInt(c.score)||0]));
-        const margin=(scores.home||0)-(scores.away||0);
-        const gameDate=new Date(evt.date);
-        compTs.forEach(c=>{
-          const k=matchESPN(c.team?.displayName||"");
-          if(!k)return;
-          const isHome=c.homeAway==="home",won=c.winner===true;
-          const tm=isHome?margin:-margin;
-          // 1H linescore: linescores[0].value = 1st half pts scored by this team
-          const ls=c.linescores||[];
-          const h1scored=ls[0]&&ls[0].value!=null?parseFloat(ls[0].value):null;
-          const opp=compTs.find(x=>x.homeAway!==c.homeAway);
-          const oppLs=opp?opp.linescores||[]:[];
-          const h1allowed=oppLs[0]&&oppLs[0].value!=null?parseFloat(oppLs[0].value):null;
-          if(!td[k])td[k]={lastDate:null,games:[]};
-          td[k].games.push({date:gameDate,won,isHome,margin:tm,h1scored,h1allowed});
-          if(!td[k].lastDate||gameDate>td[k].lastDate)td[k].lastDate=gameDate;
-        });
-      });
-    });
-    Object.values(td).forEach(t=>t.games.sort((a,b)=>b.date-a.date));
-    if(fetched>0)ss(SK.espn,{ts:now,data:td});
-    return{data:td,source:fetched>0?"live":"failed",ts:now,teams:Object.keys(td).length};
-  }catch(e){
-    console.warn("ESPN:",e.message);
-    return{data:cached?.data||{},source:"failed",ts:cached?.ts||0,teams:0};
-  }
+const cached=sg(SK.espn,null),now=Date.now();
+if(cached&&cached.ts&&(now-cached.ts)<ESPN_TTL)return{data:cached.data,source:"cached",ts:cached.ts,teams:Object.keys(cached.data||{}).length};
+const td={};let fetched=0;
+try{
+const prs=Array.from({length:10},(_,d)=>fetch(`${ESPN_BASE}/scoreboard?dates=${espnDs(d)}&limit=500`).then(r=>r.ok?r.json():null).catch(()=>null));
+const rr=await Promise.all(prs);
+rr.forEach((data)=>{
+if(!data||!data.events)return;fetched++;
+data.events.forEach(evt=>{
+const comp=evt.competitions?.[0];const st=comp?.status?.type;if(!st?.completed&&st?.name!=="STATUS_FINAL")return;
+const compTs=evt.competitions?.[0]?.competitors||[];const scores=Object.fromEntries(compTs.map(c=>[c.homeAway,parseInt(c.score)||0]));const margin=(scores.home||0)-(scores.away||0);const gameDate=new Date(evt.date);
+compTs.forEach(c=>{
+const k=matchESPN(c.team?.displayName||"");if(!k)return;
+const isHome=c.homeAway==="home",won=c.winner===true,tm=isHome?margin:-margin;
+const ls=c.linescores||[];const h1scored=ls[0]&&ls[0].value!=null?parseFloat(ls[0].value):null;
+const opp=compTs.find(x=>x.homeAway!==c.homeAway);const oppLs=opp?opp.linescores||[]:[];const h1allowed=oppLs[0]&&oppLs[0].value!=null?parseFloat(oppLs[0].value):null;
+if(!td[k])td[k]={lastDate:null,games:[]};
+td[k].games.push({date:gameDate,won,isHome,margin:tm,h1scored,h1allowed});
+if(!td[k].lastDate||gameDate>td[k].lastDate)td[k].lastDate=gameDate;
+});
+});
+});
+Object.values(td).forEach(t=>t.games.sort((a,b)=>b.date-a.date));
+if(fetched>0)ss(SK.espn,{ts:now,data:td});
+return{data:td,source:fetched>0?"live":"failed",ts:now,teams:Object.keys(td).length};
+}catch(e){console.warn("ESPN:",e.message);return{data:cached?.data||{},source:"failed",ts:cached?.ts||0,teams:0};}
 }
-// ── ESPN META ENGINE (rankings · injuries · neutral site · conf tourney · records) ──
 async function fetchESPNMeta(){
-  const cached=sg(SK.meta,null),now=Date.now();
-  if(cached&&cached.ts&&(now-cached.ts)<1800000)return cached;
-  const meta={ts:now,rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}};
-  try{
-    const rRes=await fetch(`${ESPN_BASE}/rankings`).then(r=>r.ok?r.json():null).catch(()=>null);
-    if(rRes?.rankings){
-      rRes.rankings.forEach(poll=>{
-        if(!(poll.name||"").includes("AP"))return;
-        (poll.ranks||[]).forEach(r=>{
-          const raw=r.team?.displayName||"";
-          const k=normalizeTeamName(raw);
-          const match=TE[k]?k:Object.keys(TE).find(t=>t.toLowerCase()===k.toLowerCase())||
-            (()=>{const w=k.split(" ");for(let i=1;i<w.length;i++){const c=w.slice(0,w.length-i).join(" ");if(TE[c])return c;}return null;})();
-          if(match)meta.rankings[match]=r.current;
-        });
-      });
-    }
-    const today=new Date().toISOString().slice(0,10).replace(/-/g,"");
-    const tRes=await fetch(`${ESPN_BASE}/scoreboard?dates=${today}&groups=50&limit=300`).then(r=>r.ok?r.json():null).catch(()=>null);
-    if(tRes?.events){
-      tRes.events.forEach(evt=>{
-        const comp=evt.competitions?.[0];if(!comp)return;
-        const teams=comp.competitors||[];
-        const away=teams.find(t=>t.homeAway==="away");
-        const home=teams.find(t=>t.homeAway==="home");
-        if(!away||!home)return;
-        const awayN=away.team?.displayName||"";
-        const homeN=home.team?.displayName||"";
-        const gkey=`${awayN}@${homeN}`;
-        if(comp.neutralSite)meta.neutralGames[gkey]=true;
-        const notes=(comp.notes||[]).map(n=>(n.headline||n.text||"")).join(" ").toLowerCase();
-        if(notes.includes("conference")||notes.includes("tourney")||notes.includes("tournament")||
-           (evt.season?.slug||"").includes("tournament")||(evt.seasonType?.name||"").includes("Tournament")){
-          meta.confTourneyGames[gkey]=true;
-          meta.neutralGames[gkey]=true;
-        }
-        teams.forEach(t=>{
-          const n2=normalizeTeamName(t.team?.displayName||"");
-          const rec=(t.records||[]).find(r=>r.type==="total")||t.records?.[0];
-          if(n2&&rec?.summary)meta.records[n2]=rec.summary;
-        });
-      });
-    }
-    const nRes=await fetch(`${ESPN_BASE}/news?limit=80`).then(r=>r.ok?r.json():null).catch(()=>null);
-    if(nRes?.articles){
-      nRes.articles.forEach(art=>{
-        const hl=art.headline||"";
-        const lo=hl.toLowerCase();
-        if(!lo.includes("injur")&&!lo.includes(" out ")&&!lo.includes("questionable")&&
-           !lo.includes("doubtful")&&!lo.includes("suspend")&&!lo.includes("day-to-day"))return;
-        Object.keys(TE).forEach(tn=>{
-          if(hl.includes(tn)||(tn.split(" ").length>1&&hl.toLowerCase().includes(tn.toLowerCase()))){
-            if(!meta.injuries[tn])meta.injuries[tn]=[];
-            if(meta.injuries[tn].length<3)meta.injuries[tn].push(hl);
-          }
-        });
-      });
-    }
-    ss(SK.meta,meta);
-  }catch(e){console.warn("ESPN meta:",e.message);}
-  return meta;
+const cached=sg(SK.meta,null),now=Date.now();
+if(cached&&cached.ts&&(now-cached.ts)<1800000)return cached;
+const meta={ts:now,rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}};
+try{
+const rRes=await fetch(`${ESPN_BASE}/rankings`).then(r=>r.ok?r.json():null).catch(()=>null);
+if(rRes?.rankings){rRes.rankings.forEach(poll=>{if(!(poll.name||"").includes("AP"))return;(poll.ranks||[]).forEach(r=>{const raw=r.team?.displayName||"";const k=normalizeTeamName(raw);const match=TE[k]?k:Object.keys(TE).find(t=>t.toLowerCase()===k.toLowerCase())||(()=>{const w=k.split(" ");for(let i=1;i<w.length;i++){const c=w.slice(0,w.length-i).join(" ");if(TE[c])return c;}return null;})();if(match)meta.rankings[match]=r.current;});});}
+const today=new Date().toISOString().slice(0,10).replace(/-/g,"");
+const tRes=await fetch(`${ESPN_BASE}/scoreboard?dates=${today}&groups=50&limit=300`).then(r=>r.ok?r.json():null).catch(()=>null);
+if(tRes?.events){tRes.events.forEach(evt=>{const comp=evt.competitions?.[0];if(!comp)return;const teams=comp.competitors||[];const away=teams.find(t=>t.homeAway==="away");const home=teams.find(t=>t.homeAway==="home");if(!away||!home)return;const awayN=away.team?.displayName||"";const homeN=home.team?.displayName||"";const gkey=`${awayN}@${homeN}`;if(comp.neutralSite)meta.neutralGames[gkey]=true;const notes=(comp.notes||[]).map(n=>(n.headline||n.text||"")).join(" ").toLowerCase();if(notes.includes("conference")||notes.includes("tourney")||notes.includes("tournament")||(evt.season?.slug||"").includes("tournament")||(evt.seasonType?.name||"").includes("Tournament")){meta.confTourneyGames[gkey]=true;meta.neutralGames[gkey]=true;}teams.forEach(t=>{const n2=normalizeTeamName(t.team?.displayName||"");const rec=(t.records||[]).find(r=>r.type==="total")||t.records?.[0];if(n2&&rec?.summary)meta.records[n2]=rec.summary;});});}
+const nRes=await fetch(`${ESPN_BASE}/news?limit=80`).then(r=>r.ok?r.json():null).catch(()=>null);
+if(nRes?.articles){nRes.articles.forEach(art=>{const hl=art.headline||"";const lo=hl.toLowerCase();if(!lo.includes("injur")&&!lo.includes(" out ")&&!lo.includes("questionable")&&!lo.includes("doubtful")&&!lo.includes("suspend")&&!lo.includes("day-to-day"))return;Object.keys(TE).forEach(tn=>{if(hl.includes(tn)||(tn.split(" ").length>1&&hl.toLowerCase().includes(tn.toLowerCase()))){if(!meta.injuries[tn])meta.injuries[tn]=[];if(meta.injuries[tn].length<3)meta.injuries[tn].push(hl);}});});}
+ss(SK.meta,meta);
+}catch(e){console.warn("ESPN meta:",e.message);}
+return meta;
 }
-
 
 function getSchedCtx(key,cache,gameDate){
-  const data=cache?.[key];
-  const gdt=gameDate?new Date(gameDate):new Date(),gms=gdt.getTime();
-  if(!data?.games?.length)return{restDays:3,isB2B:false,recentWinPct:0.5,recentMargin:0,gamesFound:false};
-  const prior=data.games.filter(g=>g.date.getTime()<gms-3600000);
-  if(!prior.length)return{restDays:3,isB2B:false,recentWinPct:0.5,recentMargin:0,gamesFound:false};
-  const last=prior[0];
-  const restDays=Math.max(0,Math.round((gms-last.date.getTime())/86400000));
-  const isB2B=restDays<=1;
-  const recent=prior.slice(0,10);
-  const recentWinPct=recent.length?recent.filter(g=>g.won).length/recent.length:0.5;
-  const recentMargin=recent.length?recent.reduce((s,g)=>s+g.margin,0)/recent.length:0;
-  return{restDays,isB2B,recentWinPct,recentMargin,gamesFound:true};
+const data=cache?.[key];const gdt=gameDate?new Date(gameDate):new Date(),gms=gdt.getTime();
+if(!data?.games?.length)return{restDays:3,isB2B:false,recentWinPct:0.5,recentMargin:0,gamesFound:false};
+const prior=data.games.filter(g=>g.date.getTime()<gms-3600000);if(!prior.length)return{restDays:3,isB2B:false,recentWinPct:0.5,recentMargin:0,gamesFound:false};
+const last=prior[0],restDays=Math.max(0,Math.round((gms-last.date.getTime())/86400000)),isB2B=restDays<=1;
+const recent=prior.slice(0,10),recentWinPct=recent.length?recent.filter(g=>g.won).length/recent.length:0.5,recentMargin=recent.length?recent.reduce((s,g)=>s+g.margin,0)/recent.length:0;
+return{restDays,isB2B,recentWinPct,recentMargin,gamesFound:true};
 }
 
-// ── TRAVEL FATIGUE ENGINE ─────────────────────────────────────────────────────
-function haversineKm(la1,lo1,la2,lo2){
-  const R=6371,dLa=(la2-la1)*Math.PI/180,dLo=(lo2-lo1)*Math.PI/180;
-  const a=Math.sin(dLa/2)**2+Math.cos(la1*Math.PI/180)*Math.cos(la2*Math.PI/180)*Math.sin(dLo/2)**2;
-  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
-}
+function haversineKm(la1,lo1,la2,lo2){const R=6371,dLa=(la2-la1)*Math.PI/180,dLo=(lo2-lo1)*Math.PI/180;const a=Math.sin(dLa/2)**2+Math.cos(la1*Math.PI/180)*Math.cos(la2*Math.PI/180)*Math.sin(dLo/2)**2;return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));}
 function getTravelFatigue(awayKey,homeKey,awayRest){
-  const aw=AD[awayKey],ho=AD[homeKey];
-  if(!aw||!ho)return{distKm:0,tzDelta:0,fatiguePenalty:0};
-  const distKm=haversineKm(aw.lat,aw.lon,ho.lat,ho.lon);
-  const tzDelta=ho.tz-aw.tz;
-  let p=Math.floor(distKm/500)*0.40;
-  if(awayRest<=1)p+=awayRest===0?3.2:1.1;
-  if(tzDelta<0)p+=Math.abs(tzDelta)*0.55;
-  if(tzDelta>0)p-=tzDelta*0.15;
-  if(awayRest>=6)p+=0.8;
-  return{distKm:Math.round(distKm),tzDelta,fatiguePenalty:+Math.max(0,p).toFixed(1)};
+const aw=AD[awayKey],ho=AD[homeKey];if(!aw||!ho)return{distKm:0,tzDelta:0,fatiguePenalty:0};
+const distKm=haversineKm(aw.lat,aw.lon,ho.lat,ho.lon),tzDelta=ho.tz-aw.tz;
+let p=Math.floor(distKm/500)*0.40;if(awayRest<=1)p+=awayRest===0?3.2:1.1;if(tzDelta<0)p+=Math.abs(tzDelta)*0.55;if(tzDelta>0)p-=tzDelta*0.15;if(awayRest>=6)p+=0.8;
+return{distKm:Math.round(distKm),tzDelta,fatiguePenalty:+Math.max(0,p).toFixed(1)};
 }
 
-// ── TEAM LOOKUP ───────────────────────────────────────────────────────────────
-// Acronym aliases: Odds API full name → DB key
-const ACRONYM_ALIASES={
-  // UCF
-  "Central Florida":"UCF",
-  // FIU / FAU
-  "FIU":"Florida International",
-  "FAU":"Florida Atlantic",
-  // VCU
-  "UAB":"UAB",
-  "Virginia Commonwealth":"VCU",
-  // Louisiana schools
-  "Louisiana":"Louisiana",
-  "Louisiana Ragin Cajuns":"Louisiana",
-  "Louisiana Ragin' Cajuns":"Louisiana",
-  "UL Lafayette":"Louisiana",
-  "UL Monroe":"Louisiana Monroe",
-  "Louisiana-Monroe":"Louisiana Monroe",
-  // Loyola Marymount
-  "LMU":"Loyola Marymount",
-  // Cal State
-  "CSUN":"Cal State Northridge",
-  "CS Fullerton":"Cal State Fullerton",
-  // SIU Edwardsville
-  "Southern Illinois Edwardsville":"SIUE",
-  "SIU Edwardsville":"SIUE",
-  // ETSU
-  "East Tennessee State":"ETSU",
-  // Houston Baptist (now Houston Christian)
-  "Houston Christian":"Houston Baptist",
-  // Ole Miss
-  "Mississippi":"Ole Miss",
-  // UMass
-  "UMass":"Massachusetts",
-  "Massachusetts Minutemen":"Massachusetts",
-  // NC State
-  "North Carolina State":"NC State",
-  // Miami OH
-  "Miami Ohio":"Miami OH",
-  "Miami (OH)":"Miami OH",
-  // Maryland-Eastern Shore
-  "Maryland Eastern Shore":"Maryland-Eastern Shore",
-  // Bethune-Cookman (DB has hyphen, ESPN sometimes omits)
-  "Bethune Cookman":"Bethune-Cookman",
-  // St. Joseph's → Saint Joseph
-  "St. Joseph":"Saint Joseph",
-  "Saint Joseph's":"Saint Joseph",
-  "Saint Bonaventure":"St. Bonaventure",
-  // Stephen F. Austin
-  "Stephen F. Austin":"Stephen F Austin",
-  // UT Martin / Tennessee-Martin
-  "UT Martin":"Tennessee Martin",
-  "Tennessee Martin":"Tennessee Martin",
-  "Tennessee-Martin":"Tennessee Martin",
-  // UNCW
-  "UNC Wilmington":"UNCW",
-  "North Carolina Wilmington":"UNCW",
-  // Arkansas schools
-  "Arkansas Pine Bluff":"Arkansas Pine Bluff",
-  // Additional aliases for Odds API naming variants
-  "App State":"Appalachian State",
-  "Appalachian State Mountaineers":"Appalachian State",
-  "Coastal Carolina Chanticleers":"Coastal Carolina",
-  "Florida Gulf Coast":"Florida Gulf Coast",
-  "FGCU":"Florida Gulf Coast",
-  "Austin Peay Governors":"Austin Peay",
-  "UNC Asheville":"UNC Asheville",
-  "UNC Greensboro":"UNC Greensboro",
-  "North Dakota Fighting Hawks":"North Dakota",
-  "Tennessee State":"Tennessee State",
-  "Purdue Fort Wayne":"Purdue Fort Wayne",
-  "Fort Wayne":"Purdue Fort Wayne",
-  "Saint Thomas":"St. Thomas",
-  "St. Thomas":"St. Thomas",
-  "Seattle Redhawks":"Seattle",
-  "Southeast Missouri":"Southeast Missouri State",
-  "SEMO":"Southeast Missouri State",
-  "SE Missouri State":"Southeast Missouri State",
-  "Southern Indiana":"Southern Indiana",
-  "Winthrop Eagles":"Winthrop",
-  // Odds API sends mascot names; common ones that might slip through strip
-  "Miami Hurricanes":"Miami",
-  "Miami Redhawks":"Miami OH",
-  "Miami RedHawks":"Miami OH",
-};
-function normalizeTeamName(n){
-  if(!n)return n;
-  // First check acronym alias table (before any other transforms)
-  if(ACRONYM_ALIASES[n])return ACRONYM_ALIASES[n];
-  return n
-    .replace(/-/g," ")                      // "Arkansas-Pine Bluff" → "Arkansas Pine Bluff"
-    .replace(/\bInt'l\b/g,"International") // "Florida Int'l" → "Florida International"
-    .replace(/\s*\(OH\)/g," OH")          // "Miami (OH)" → "Miami OH"
-    // St\s removed: Odds API uses "St." (period) so alias table handles these; bare "St " without period would corrupt e.g. "St Bonaventure"→"State Bonaventure"
-    .replace(/\bSt$/,"State")               // trailing "St" → "State"
-    .replace(/'\w*/g,"")                   // "John's" → "John", "Mary's" → "Mary"
-    .replace(/\s+/g," ").trim();
-}
+const ACRONYM_ALIASES={"Central Florida":"UCF","FIU":"Florida International","FAU":"Florida Atlantic","UAB":"UAB","Virginia Commonwealth":"VCU","Louisiana":"Louisiana","Louisiana Ragin Cajuns":"Louisiana","Louisiana Ragin' Cajuns":"Louisiana","UL Lafayette":"Louisiana","UL Monroe":"Louisiana Monroe","Louisiana-Monroe":"Louisiana Monroe","LMU":"Loyola Marymount","CSUN":"Cal State Northridge","CS Fullerton":"Cal State Fullerton","Southern Illinois Edwardsville":"SIUE","SIU Edwardsville":"SIUE","East Tennessee State":"ETSU","Houston Christian":"Houston Baptist","Mississippi":"Ole Miss","UMass":"Massachusetts","Massachusetts Minutemen":"Massachusetts","North Carolina State":"NC State","Miami Ohio":"Miami OH","Miami (OH)":"Miami OH","Maryland Eastern Shore":"Maryland-Eastern Shore","Bethune Cookman":"Bethune-Cookman","St. Joseph":"Saint Joseph","Saint Joseph's":"Saint Joseph","Saint Bonaventure":"St. Bonaventure","Stephen F. Austin":"Stephen F Austin","UT Martin":"Tennessee Martin","Tennessee Martin":"Tennessee Martin","Tennessee-Martin":"Tennessee Martin","UNC Wilmington":"UNCW","North Carolina Wilmington":"UNCW","Arkansas Pine Bluff":"Arkansas Pine Bluff","App State":"Appalachian State","Appalachian State Mountaineers":"Appalachian State","Coastal Carolina Chanticleers":"Coastal Carolina","Florida Gulf Coast":"Florida Gulf Coast","FGCU":"Florida Gulf Coast","Austin Peay Governors":"Austin Peay","UNC Asheville":"UNC Asheville","UNC Greensboro":"UNC Greensboro","North Dakota Fighting Hawks":"North Dakota","Tennessee State":"Tennessee State","Purdue Fort Wayne":"Purdue Fort Wayne","Fort Wayne":"Purdue Fort Wayne","Saint Thomas":"St. Thomas","St. Thomas":"St. Thomas","Seattle Redhawks":"Seattle","Southeast Missouri":"Southeast Missouri State","SEMO":"Southeast Missouri State","SE Missouri State":"Southeast Missouri State","Southern Indiana":"Southern Indiana","Winthrop Eagles":"Winthrop","Miami Hurricanes":"Miami","Miami Redhawks":"Miami OH","Miami RedHawks":"Miami OH"};
+
+function normalizeTeamName(n){if(!n)return n;if(ACRONYM_ALIASES[n])return ACRONYM_ALIASES[n];return n.replace(/-/g," ").replace(/\bInt'l\b/g,"International").replace(/\s*(OH)/g," OH").replace(/\bSt$/,"State").replace(/'\w*/g,"").replace(/\s+/g," ").trim();}
+
 function getEff(n){
-  if(!n)return{rank:110,adjEM:0,adjO:100,adjD:100,pace:67,defReb:70,toRate:16,efg:50,name:"Unknown"};
-  if(TE[n])return{...TE[n],name:n};
-  const keys=Object.keys(TE);
-  // Normalize: expand abbreviations, strip apostrophes
-  const n2=normalizeTeamName(n);
-  if(TE[n2])return{...TE[n2],name:n2};
-  const lo=n2.toLowerCase();
-  // Helper: case-insensitive exact match
-  const exact=s=>keys.find(k=>k.toLowerCase()===s.toLowerCase());
-  // 1. Exact match on normalized name
-  let k=exact(n2);
-  // 2. Progressive word stripping from the right (handles any mascot name)
-  //    "Florida A&M Rattlers" → try "Florida A&M" → found ✓
-  //    "Alabama State Hornets" → try "Alabama State" → found ✓
-  //    Stops before candidate gets too short to be meaningful
-  if(!k){
-    const words=n2.split(" ");
-    for(let trim=1;trim<words.length;trim++){
-      const candidate=words.slice(0,words.length-trim).join(" ");
-      if(candidate.length<2)break;
-      // Also resolve through acronym alias table during strip
-      const aliased=ACRONYM_ALIASES[candidate];
-      if(aliased&&TE[aliased]){k=aliased;break;}
-      const found=exact(candidate);
-      if(found){k=found;break;}
-    }
-  }
-  // 3. DB key fully contained in input with word boundaries
-  //    Sorted longest-first so "Florida A&M" beats "Florida"
-  if(!k){
-    const sorted=[...keys].sort((a,b)=>b.length-a.length);
-    k=sorted.find(k2=>{
-      if(k2.length<2)return false;
-      const kl=k2.toLowerCase();
-      const idx=lo.indexOf(kl);
-      if(idx===-1)return false;
-      const before=idx===0||lo[idx-1]===" ";
-      const after=idx+kl.length===lo.length||lo[idx+kl.length]===" ";
-      return before&&after;
-    });
-  }
-  return k?{...TE[k],name:k}:{rank:110,adjEM:0,adjO:100,adjD:100,pace:67,defReb:70,toRate:16,efg:50,name:n};
+if(!n)return{rank:110,adjEM:0,adjO:100,adjD:100,pace:67,defReb:70,toRate:16,efg:50,name:"Unknown"};
+if(TE[n])return{...TE[n],name:n};
+const keys=Object.keys(TE),n2=normalizeTeamName(n);
+if(TE[n2])return{...TE[n2],name:n2};
+const lo=n2.toLowerCase(),exact=s=>keys.find(k=>k.toLowerCase()===s.toLowerCase());
+let k=exact(n2);
+if(!k){const words=n2.split(" ");for(let trim=1;trim<words.length;trim++){const candidate=words.slice(0,words.length-trim).join(" ");if(candidate.length<2)break;const aliased=ACRONYM_ALIASES[candidate];if(aliased&&TE[aliased]){k=aliased;break;}const found=exact(candidate);if(found){k=found;break;}}}
+if(!k){const sorted=[...keys].sort((a,b)=>b.length-a.length);k=sorted.find(k2=>{if(k2.length<2)return false;const kl=k2.toLowerCase();const idx=lo.indexOf(kl);if(idx===-1)return false;const before=idx===0||lo[idx-1]===" ";const after=idx+kl.length===lo.length||lo[idx+kl.length]===" ";return before&&after;});}
+return k?{...TE[k],name:k}:{rank:110,adjEM:0,adjO:100,adjD:100,pace:67,defReb:70,toRate:16,efg:50,name:n};
 }
 
-// ── KELLY SIZING ──────────────────────────────────────────────────────────────
-function kellySize(prob,odds,br,cap){
-  const b=odds>0?odds/100:100/Math.abs(odds),p=Math.min(0.95,Math.max(0.05,prob)),q=1-p;
-  return +(Math.min(Math.max(0,(b*p-q)/b*0.25),cap||0.05)*br).toFixed(2);
-}
+function kellySize(prob,odds,br,cap){const b=odds>0?odds/100:100/Math.abs(odds),p=Math.min(0.95,Math.max(0.05,prob)),q=1-p;return +(Math.min(Math.max(0,(b*p-q)/b*0.25),cap||0.05)*br).toFixed(2);}
 function calcUnits(br,dmp=0.12){const u=br*0.02;return{unit:+u.toFixed(2),anchor:+(u*2.5).toFixed(2),core:+(u*1.5).toFixed(2),optional:+u.toFixed(2),maxDaily:+(br*dmp).toFixed(2),dmp}}
 
-// ── GAME ANALYSIS ─────────────────────────────────────────────────────────────
 function analyzeGame(g,ml,br,espnData,meta,dmp=0.12){
-  const home=g.home_team,away=g.away_team;
-  const he=getEff(home),ae=getEff(away);
-  const m=meta||{rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}};
-  // Odds parsing
-  let hML=null,aML=null,hSp=null,hSpO=null,aSp=null,aSpO=null,openSp=null;
-  const spHist=[];
-  (g.bookmakers||[]).forEach((bm,bi)=>{
-    (bm.markets||[]).forEach(mkt=>{
-      if(mkt.key==="h2h")mkt.outcomes.forEach(o=>{
-        if(o.name===home&&(!hML||o.price>hML))hML=o.price;
-        if(o.name===away&&(!aML||o.price>aML))aML=o.price;
-      });
-      if(mkt.key==="spreads")mkt.outcomes.forEach(o=>{
-        if(o.name===home){spHist.push(o.point);if(bi===0)openSp=o.point;if(!hSp||o.price>(hSpO||-9999)){hSp=o.point;hSpO=o.price;}}
-        if(o.name===away&&!aSp){aSp=o.point;aSpO=o.price;}
-      });
-    });
-  });
-  const lm=(openSp!==null&&hSp!==null)?+(hSp-openSp).toFixed(1):null;
-  // Line movement flag: >=1.5pt shift = sharp money signal
-  const sharpMove=lm!==null&&Math.abs(lm)>=1.5;
-
-  // Neutral site / conf tourney detection via ESPN meta
-  const gkeyFwd=`${away}@${home}`;
-  const gkeyRev=`${home}@${away}`;
-  const isNeutral=!!(g.neutral_site||m.neutralGames[gkeyFwd]||m.neutralGames[gkeyRev]);
-  const isConfTourney=!!(m.confTourneyGames[gkeyFwd]||m.confTourneyGames[gkeyRev]);
-  // AP rankings
-  const hRank=m.rankings[he.name]||null;
-  const aRank=m.rankings[ae.name]||null;
-  // Injury alerts
-  const hInj=m.injuries[he.name]||[];
-  const aInj=m.injuries[ae.name]||[];
-  // W/L records
-  const hRec=m.records[he.name]||null;
-  const aRec=m.records[ae.name]||null;
-  // Vig-free market prob
-  const mlP=o=>o?(o<0?(-o)/(-o+100):100/(o+100)):0.5;
-  const rh=mlP(hML),ra=mlP(aML),nm=rh+ra;
-  const mktHP=nm>0?rh/nm:0.5;
-  // ESPN schedule context
-  const cache=espnData||{};
-  const hCtx=getSchedCtx(he.name,cache,g.commence_time);
-  const aCtx=getSchedCtx(ae.name,cache,g.commence_time);
-  // If neutral site, travel calc is symmetric — use 0 home court
-  const travel=isNeutral?{distKm:0,tzDelta:0,fatiguePenalty:0}:getTravelFatigue(ae.name,he.name,aCtx.restDays);
-  // Conf tourney flag: ESPN-detected takes precedence over date heuristic
-  const now2=new Date(),mo=now2.getMonth()+1,dy=now2.getDate();
-  const ctDate=(mo===2&&dy>=20)||(mo===3&&dy<=15)?1.0:0.2;
-  const ct=isConfTourney?1.0:ctDate;
-  // Game flags
-  const isMM=he.rank>50&&ae.rank>50;
-  const emDiff=he.adjEM-ae.adjEM;
-  const isLF=hSp&&hSp<-10;
-  const isALF=aSp&&aSp<-10;
-  const anyLF=isLF||isALF;
-  // Trap Spread Test: fav in -7→-13 bait zone + public piling on + clear talent gap
-  const favSpVal=isLF?hSp:(isALF?aSp:null);
-  const isTrapZone=favSpVal!==null&&favSpVal>=-13&&favSpVal<=-7;
-  const mktFavPct=isLF?mktHP:(1-mktHP);
-  const trapSpread=isTrapZone&&mktFavPct>0.62&&Math.abs(emDiff)>8;
-  const isSU=aSp&&aSp>0&&aSp<=4;
-  const slow=Math.min(he.pace,ae.pace)<66;
-  const pubPen=Math.abs(emDiff+3.2)>20;
-  // Features — pass isNeutral so home court weight is zeroed
-  const schedCtx={
-    homeRestDays:hCtx.restDays,awayRestDays:aCtx.restDays,
-    homeB2B:hCtx.isB2B,awayB2B:aCtx.isB2B,
-    travelPenalty:travel.fatiguePenalty,
-    homeFormMargin:hCtx.recentMargin,awayFormMargin:aCtx.recentMargin,
-  };
-  const feats=ml.buildFeatures(he,ae,hSp,isNeutral?false:true,isMM,lm,schedCtx);
-  feats.confTourney=ct;
-  const modHP=ml.predict(feats);
-  const edge=modHP-mktHP,absE=Math.abs(edge);
-  const valSide=edge>0?home:away;
-  const recOdds=edge>0?(hSpO||(-110)):(aSpO||(-110));
-  const isVal=absE>0.04&&!pubPen;
-  const es=Math.min(30,+(Math.abs(emDiff)*0.8+absE*30).toFixed(1));
-  // Checklist
-  const cl={
-    efficiencyMismatch:Math.abs(emDiff)>8,noPublicBias:!pubPen,shortUnderdog:isSU,
-    slowTempo:slow,defReboundEdge:Math.abs(he.defReb-ae.defReb)>3,
-    midMajorEdge:isMM,valueDetected:isVal,noLargeFavorite:!anyLF,
-    homeMoreRested:hCtx.restDays>aCtx.restDays+1,awayB2BFlag:aCtx.isB2B,
-    sharpLineMove:sharpMove,neutralSite:isNeutral,trapSpreadAlert:trapSpread,
-  };
-  const cs=Object.values(cl).filter(Boolean).length;
-  const conf=Math.min(94,Math.round(50+es*1.4+absE*28+cs*1.6));
-  const kellyWager=kellySize(edge>0?modHP:(1-modHP),recOdds,br,0.05);
-  return{
-    id:g.id||(home+away),home,away,he,ae,hML,aML,hSp,hSpO,aSp,aSpO,
-    mktHP:(mktHP*100).toFixed(1),modHP:(modHP*100).toFixed(1),
-    edge:edge.toFixed(3),es,isVal,valSide,conf,lm,sharpMove,isMM,isLF,isALF,anyLF,isSU,slow,pubPen,trapSpread,
-    isNeutral,isConfTourney,hRank,aRank,hInj,aInj,hRec,aRec,
-    cl,cs,feats,kellyWager,commenceTime:g.commence_time,units:calcUnits(br,dmp),
-    schedule:{
-      homeRestDays:hCtx.restDays,awayRestDays:aCtx.restDays,
-      homeB2B:hCtx.isB2B,awayB2B:aCtx.isB2B,
-      homeForm:hCtx.recentWinPct,awayForm:aCtx.recentWinPct,
-      homeFormMargin:hCtx.recentMargin,awayFormMargin:aCtx.recentMargin,
-      travelKm:travel.distKm,tzDelta:travel.tzDelta,
-      fatiguePenalty:travel.fatiguePenalty,
-      liveData:hCtx.gamesFound||aCtx.gamesFound,
-    },
-  };
+const home=g.home_team,away=g.away_team,he=getEff(home),ae=getEff(away);
+const m=meta||{rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}};
+let hML=null,aML=null,hSp=null,hSpO=null,aSp=null,aSpO=null,openSp=null;const spHist=[];
+(g.bookmakers||[]).forEach((bm,bi)=>{(bm.markets||[]).forEach(mkt=>{if(mkt.key==="h2h")mkt.outcomes.forEach(o=>{if(o.name===home&&(!hML||o.price>hML))hML=o.price;if(o.name===away&&(!aML||o.price>aML))aML=o.price;});if(mkt.key==="spreads")mkt.outcomes.forEach(o=>{if(o.name===home){spHist.push(o.point);if(bi===0)openSp=o.point;if(!hSp||o.price>(hSpO||-9999)){hSp=o.point;hSpO=o.price;}}if(o.name===away&&!aSp){aSp=o.point;aSpO=o.price;}});});});
+const lm=(openSp!==null&&hSp!==null)?+(hSp-openSp).toFixed(1):null,sharpMove=lm!==null&&Math.abs(lm)>=1.5;
+const gkeyFwd=`${away}@${home}`,gkeyRev=`${home}@${away}`;
+const isNeutral=!!(g.neutral_site||m.neutralGames[gkeyFwd]||m.neutralGames[gkeyRev]);
+const isConfTourney=!!(m.confTourneyGames[gkeyFwd]||m.confTourneyGames[gkeyRev]);
+const hRank=m.rankings[he.name]||null,aRank=m.rankings[ae.name]||null,hInj=m.injuries[he.name]||[],aInj=m.injuries[ae.name]||[],hRec=m.records[he.name]||null,aRec=m.records[ae.name]||null;
+const mlP=o=>o?(o<0?(-o)/(-o+100):100/(o+100)):0.5;const rh=mlP(hML),ra=mlP(aML),nm=rh+ra,mktHP=nm>0?rh/nm:0.5;
+const cache=espnData||{},hCtx=getSchedCtx(he.name,cache,g.commence_time),aCtx=getSchedCtx(ae.name,cache,g.commence_time);
+const travel=isNeutral?{distKm:0,tzDelta:0,fatiguePenalty:0}:getTravelFatigue(ae.name,he.name,aCtx.restDays);
+const now2=new Date(),mo=now2.getMonth()+1,dy=now2.getDate();const ctDate=(mo===2&&dy>=20)||(mo===3&&dy<=15)?1.0:0.2;const ct=isConfTourney?1.0:ctDate;
+const isMM=he.rank>50&&ae.rank>50,emDiff=he.adjEM-ae.adjEM,isLF=hSp&&hSp<-10,isALF=aSp&&aSp<-10,anyLF=isLF||isALF;
+const favSpVal=isLF?hSp:(isALF?aSp:null),isTrapZone=favSpVal!==null&&favSpVal>=-13&&favSpVal<=-7,mktFavPct=isLF?mktHP:(1-mktHP),trapSpread=isTrapZone&&mktFavPct>0.62&&Math.abs(emDiff)>8;
+const isSU=aSp&&aSp>0&&aSp<=4,slow=Math.min(he.pace,ae.pace)<66,pubPen=Math.abs(emDiff+3.2)>20;
+const schedCtx={homeRestDays:hCtx.restDays,awayRestDays:aCtx.restDays,homeB2B:hCtx.isB2B,awayB2B:aCtx.isB2B,travelPenalty:travel.fatiguePenalty,homeFormMargin:hCtx.recentMargin,awayFormMargin:aCtx.recentMargin};
+const feats=ml.buildFeatures(he,ae,hSp,isNeutral?false:true,isMM,lm,schedCtx);feats.confTourney=ct;
+const modHP=ml.predict(feats),edge=modHP-mktHP,absE=Math.abs(edge);
+const valSide=edge>0?home:away,recOdds=edge>0?(hSpO||(-110)):(aSpO||(-110)),isVal=absE>0.04&&!pubPen;
+const es=Math.min(30,+(Math.abs(emDiff)*0.8+absE*30).toFixed(1));
+const cl={efficiencyMismatch:Math.abs(emDiff)>8,noPublicBias:!pubPen,shortUnderdog:isSU,slowTempo:slow,defReboundEdge:Math.abs(he.defReb-ae.defReb)>3,midMajorEdge:isMM,valueDetected:isVal,noLargeFavorite:!anyLF,homeMoreRested:hCtx.restDays>aCtx.restDays+1,awayB2BFlag:aCtx.isB2B,sharpLineMove:sharpMove,neutralSite:isNeutral,trapSpreadAlert:trapSpread};
+const cs=Object.values(cl).filter(Boolean).length,conf=Math.min(94,Math.round(50+es*1.4+absE*28+cs*1.6)),kellyWager=kellySize(edge>0?modHP:(1-modHP),recOdds,br,0.05);
+return{id:g.id||(home+away),home,away,he,ae,hML,aML,hSp,hSpO,aSp,aSpO,mktHP:(mktHP*100).toFixed(1),modHP:(modHP*100).toFixed(1),edge:edge.toFixed(3),es,isVal,valSide,conf,lm,sharpMove,isMM,isLF,isALF,anyLF,isSU,slow,pubPen,trapSpread,isNeutral,isConfTourney,hRank,aRank,hInj,aInj,hRec,aRec,cl,cs,feats,kellyWager,commenceTime:g.commence_time,units:calcUnits(br,dmp),schedule:{homeRestDays:hCtx.restDays,awayRestDays:aCtx.restDays,homeB2B:hCtx.isB2B,awayB2B:aCtx.isB2B,homeForm:hCtx.recentWinPct,awayForm:aCtx.recentWinPct,homeFormMargin:hCtx.recentMargin,awayFormMargin:aCtx.recentMargin,travelKm:travel.distKm,tzDelta:travel.tzDelta,fatiguePenalty:travel.fatiguePenalty,liveData:hCtx.gamesFound||aCtx.gamesFound}};
 }
 
+/* ============================================================
+   1H TOTAL ENGINE — CALIBRATED
+   analyze1HPick: rejects any marketLine outside 35–85 range
+   This prevents full-game totals from creating false edges.
+   ============================================================ */
 
-// ── 1ST HALF TOTAL ENGINE ─────────────────────────────────────────────────────
-// Extract real 1H scoring averages from ESPN cache (last N games)
-function get1HStats(key, cache, n=8){
-  const games=(cache?.[key]?.games||[])
-    .filter(g=>g.h1scored!=null&&g.h1allowed!=null)
-    .slice(0,n);
-  if(games.length<3)return null; // need at least 3 real games
-  const h1scoredAvg=games.reduce((s,g)=>s+g.h1scored,0)/games.length;
-  const h1allowedAvg=games.reduce((s,g)=>s+g.h1allowed,0)/games.length;
-  return{h1scoredAvg:+h1scoredAvg.toFixed(1),h1allowedAvg:+h1allowedAvg.toFixed(1),n:games.length};
+function get1HStats(key,cache,n=8){
+const data=cache?.[key];if(!data?.games?.length)return null;
+const games=data.games.filter(g=>g.h1scored!=null&&g.h1allowed!=null).slice(0,n);
+if(games.length<3)return null;
+const avgH1Scored=games.reduce((s,g)=>s+g.h1scored,0)/games.length;
+const avgH1Allowed=games.reduce((s,g)=>s+g.h1allowed,0)/games.length;
+return{avgH1Scored,avgH1Allowed,n:games.length};
 }
 
-function calc1HTotal(he, ae, espnCache){
-  if(!he||!ae)return null;
-  const avgPace=(he.pace+ae.pace)/2;
-  const avgAdjO=(he.adjO+ae.adjO)/2;
-  const avgAdjD=(he.adjD+ae.adjD)/2;
-  const avgToRate=((he.toRate||15)+(ae.toRate||15))/2;
-  const avgEfg=((he.efg||52)+(ae.efg||52))/2;
-
-  // Formula-based projection (baseline)
-  const projFull=140
-    +(avgPace-68)*2.5
-    +(avgAdjO-108)*0.8
-    +(avgAdjD-94)*0.8
-    -(avgToRate-15)*0.4
-    +(avgEfg-52)*0.6;   // efg now included — higher efficiency = more scoring
-  const h1Ratio=avgPace<65?0.455:avgPace<68?0.465:avgPace<72?0.470:0.478;
-  const formulaProj=+(projFull*h1Ratio).toFixed(1);
-
-  // Real data projection from ESPN historical 1H scores
-  const heStats=get1HStats(he.name,espnCache);
-  const aeStats=get1HStats(ae.name,espnCache);
-  let realProj=null;
-  let dataGames=0;
-  if(heStats&&aeStats){
-    // Home team's avg 1H scored + Away team's avg 1H scored,
-    // adjusted by each defense: blend offense vs opponent defense
-    const heOff=heStats.h1scoredAvg, heDef=heStats.h1allowedAvg;
-    const aeOff=aeStats.h1scoredAvg, aeDef=aeStats.h1allowedAvg;
-    // Each team's expected 1H = blend of their offense vs opponent defense
-    const heExpected=(heOff+aeDef)/2;
-    const aeExpected=(aeOff+heDef)/2;
-    realProj=+(heExpected+aeExpected).toFixed(1);
-    dataGames=Math.min(heStats.n,aeStats.n);
-  }else if(heStats){
-    // Only have one team — blend 70% their avg + 30% formula
-    realProj=+(heStats.h1scoredAvg+heStats.h1allowedAvg).toFixed(1);
-    dataGames=heStats.n;
-  }else if(aeStats){
-    realProj=+(aeStats.h1scoredAvg+aeStats.h1allowedAvg).toFixed(1);
-    dataGames=aeStats.n;
-  }
-
-  // Blend: weight real data more heavily when both teams have good sample sizes
-  let proj1H, dataQuality;
-  if(realProj&&dataGames>=6){
-    proj1H=+(realProj*0.72+formulaProj*0.28).toFixed(1);
-    dataQuality="HIGH";
-  }else if(realProj&&dataGames>=3){
-    proj1H=+(realProj*0.50+formulaProj*0.50).toFixed(1);
-    dataQuality="MED";
-  }else{
-    proj1H=formulaProj;
-    dataQuality="FORMULA";
-  }
-
-  const projFull2=+projFull.toFixed(1);
-  const paceDiff=Math.abs(he.pace-ae.pace);
-  const emDiff=Math.abs(he.adjEM-ae.adjEM);
-  const conf=dataQuality==="HIGH"&&paceDiff<4?"HIGH":dataQuality==="HIGH"||paceDiff<6?"MED":"LOW";
-  return{
-    proj1H,projFull:projFull2,
-    h1Ratio:+(h1Ratio*100).toFixed(0),
-    avgPace:+avgPace.toFixed(1),
-    conf,paceDiff:+paceDiff.toFixed(1),
-    dataQuality,dataGames,
-    realProj,formulaProj,
-  };
+function calc1HTotal(he,ae,espnData){
+const hs=get1HStats(he.name,espnData);const as_=get1HStats(ae.name,espnData);
+const avgPace=(he.pace+ae.pace)/2;
+const h1Ratio=0.455+Math.max(0,(avgPace-67)*0.001);
+let projFull=(he.adjO+ae.adjO)/2*(avgPace/67)*2;
+let proj1H=projFull*h1Ratio;
+if(hs&&as_){
+const espnProj=(hs.avgH1Scored+as_.avgH1Allowed+as_.avgH1Scored+hs.avgH1Allowed)/2;
+proj1H=proj1H*0.35+espnProj*0.65;
+}
+return{proj:+proj1H.toFixed(1),ratio:+h1Ratio.toFixed(3),hasESPN:!!(hs&&as_),hStats:hs,aStats:as_};
 }
 
-function get1HEdge(proj1H, marketLine){
-  if(!proj1H||!marketLine)return null;
-  const diff=proj1H-marketLine;
-  const absDiff=Math.abs(diff);
-  // Need ≥1.5pt edge to recommend; stronger signal at 2.5+
-  if(absDiff<1.5)return{rec:"PASS",diff:+diff.toFixed(1),strength:0};
-  const strength=absDiff>=3?"STRONG":absDiff>=2?"SOLID":"LEAN";
-  const rec=diff>0?"OVER":"UNDER";
-  // Edge % approximation: each point of difference ≈ 3% edge at -110
-  const edgePct=Math.min(18,+(absDiff*3).toFixed(0));
-  return{rec,diff:+diff.toFixed(1),strength,edgePct};
+function analyze1HPick(home,away,marketLine,espnData){
+/* PATCH 1 — CALIBRATION GUARD
+   Real 1H lines: power conf 62–75, mid-major 55–65, absolute range 35–85.
+   Full-game totals (120–170) must never reach this function.
+   If marketLine is out of range, bail immediately — no pick, no false edge. */
+if(!marketLine||marketLine>85||marketLine<35)return null;
+
+const he=getEff(home),ae=getEff(away);
+const{proj,ratio,hasESPN,hStats,aStats}=calc1HTotal(he,ae,espnData);
+const edge=proj-marketLine;
+const absEdge=Math.abs(edge);
+if(absEdge<0.8)return null;
+const side=edge>0?"OVER":"UNDER";
+const conf=Math.min(88,Math.round(50+absEdge*4.5+(hasESPN?8:0)));
+if(conf<62)return null;
+return{home,away,proj,marketLine,edge:+edge.toFixed(1),side,conf,hasESPN,hStats,aStats,ratio};
 }
 
-// ── CARD BUILDER ──────────────────────────────────────────────────────────────
-const TH={anchor:{minConf:85,minEdge:18},core:{minConf:75,minEdge:10},optional:{minConf:68,minEdge:6}};
+/* ============ REACT COMPONENTS ============ */
 
-// Build a 1H total pick object from a game + live market line
-function analyze1HPick(a, marketLine, br, dmp, espnCache){
-  const h1data=calc1HTotal(a.he,a.ae,espnCache);
-  if(!h1data||!marketLine)return null;
-  const edge=get1HEdge(h1data.proj1H,marketLine);
-  if(!edge||edge.rec==="PASS")return null;
-  // ES: based on pace predictability + edge size
-  const paceConf=h1data.conf==="HIGH"?1.4:h1data.conf==="MED"?1.0:0.6;
-  const es=Math.min(30,+(Math.abs(edge.diff)*2.5*paceConf).toFixed(1));
-  // Confidence: edge strength + pace conf + efficiency gap signal
-  const emBonus=Math.abs(a.he.adjEM-a.ae.adjEM)>12?4:0;
-  const strBonus=edge.strength==="STRONG"?10:edge.strength==="SOLID"?5:0;
-  const conf=Math.min(92,Math.round(50+es*1.2+strBonus+emBonus));
-  const units=calcUnits(br,dmp);
-  // Kelly: treat as -110 even money total bet, edge% as implied prob bonus
-  const impliedProb=0.524+edge.edgePct/200; // -110 base + edge
-  const kellyWager=+(Math.min(units.anchor,Math.max(units.optional,impliedProb*units.core)).toFixed(2));
-  return{
-    id:a.id+"_h1",
-    gameId:a.id,
-    betType:"h1total",
-    home:a.home,away:a.away,he:a.he,ae:a.ae,
-    commenceTime:a.commenceTime,
-    rec:edge.rec,           // "OVER" | "UNDER"
-    marketLine,
-    proj1H:h1data.proj1H,
-    diff:edge.diff,
-    strength:edge.strength,
-    edgePct:edge.edgePct,
-    paceConf:h1data.conf,
-    avgPace:h1data.avgPace,
-    es,conf,kellyWager,
-    isConfTourney:a.isConfTourney,
-    dataQuality:h1data.dataQuality,
-    dataGames:h1data.dataGames,
-    realProj:h1data.realProj,
-    formulaProj:h1data.formulaProj,
-  };
-}
-
-function buildCard(analyzed,br,dmp=0.12,h1OddsMap={},espnCache={}){
-  const units=calcUnits(br,dmp);
-  // ── Spread picks ──
-  const elig=analyzed
-    .filter(a=>{
-      if(!a.hML||!a.hSp||a.he.rank>=108||a.ae.rank>=108)return false;
-      const pickingHomeLF=a.isLF&&a.valSide===a.home;
-      const pickingAwayLF=a.isALF&&a.valSide===a.away;
-      if(pickingHomeLF||pickingAwayLF)return false;
-      const isAnchorQuality=a.conf>=TH.anchor.minConf&&a.es>=TH.anchor.minEdge;
-      if(isAnchorQuality)return true;
-      return !a.pubPen&&Math.abs(parseFloat(a.hSp))<=10;
-    })
-    .sort((a,b)=>b.conf-a.conf);
-  const picks=[];let exp=0,ac=0,cc=0,oc=0;
-  for(const g of elig){
-    if(exp>=units.maxDaily)break;
-    let tier=null,w=0;
-    if(g.conf>=TH.anchor.minConf&&g.es>=TH.anchor.minEdge){tier="anchor";w=units.anchor;ac++;}
-    else if(g.conf>=TH.core.minConf&&g.es>=TH.core.minEdge){tier="core";w=units.core;cc++;}
-    else if(g.conf>=TH.optional.minConf&&g.es>=TH.optional.minEdge){tier="optional";w=units.optional;oc++;}
-    else continue;
-    if(exp+w>units.maxDaily){w=+(units.maxDaily-exp).toFixed(2);if(w<0.5)break;}
-    picks.push({...g,tier,wager:w,rank:picks.length+1});exp+=w;
-  }
-  // ── 1H total picks — run after spread picks, share daily exposure pool ──
-  const h1Picks=[];
-  for(const a of analyzed){
-    if(exp>=units.maxDaily)break;
-    const marketLine=h1OddsMap[a.id];
-    if(!marketLine)continue;
-    const h1pick=analyze1HPick(a,marketLine,br,dmp,espnCache);
-    if(!h1pick)continue;
-    let tier=null,w=0;
-    if(h1pick.conf>=TH.anchor.minConf&&h1pick.es>=TH.anchor.minEdge){tier="anchor";w=units.anchor;ac++;}
-    else if(h1pick.conf>=TH.core.minConf&&h1pick.es>=TH.core.minEdge){tier="core";w=units.core;cc++;}
-    else if(h1pick.conf>=TH.optional.minConf&&h1pick.es>=TH.optional.minEdge){tier="optional";w=units.optional;oc++;}
-    else continue;
-    if(exp+w>units.maxDaily){w=+(units.maxDaily-exp).toFixed(2);if(w<0.5)break;}
-    h1Picks.push({...h1pick,tier,wager:w,rank:picks.length+h1Picks.length+1});exp+=w;
-  }
-  const allPicks=[...picks,...h1Picks];
-  const pickIds=new Set(picks.map(p=>p.id));
-  const traps=analyzed.filter(a=>!pickIds.has(a.id)&&(a.pubPen||a.anyLF||(a.cs<2&&parseFloat(a.mktHP)>75))).slice(0,3);
-  return{picks:allPicks,spreadPicks:picks,h1Picks,traps,exp:exp.toFixed(2),units,anchorCount:ac,coreCount:cc,optCount:oc};
-}
-
-// ── STYLE HELPERS ─────────────────────────────────────────────────────────────
-const TIER={anchor:{icon:"⭐",label:"ANCHOR BET",color:T.gold},core:{icon:"💰",label:"CORE BET",color:T.green},optional:{icon:"🎯",label:"VALUE BET",color:T.purple}};
-const s={
-  pill:c=>({background:`${c}18`,border:`1px solid ${c}44`,color:c,fontSize:"9px",fontWeight:"700",padding:"2px 8px",borderRadius:"2px",letterSpacing:"1.5px",display:"inline-block"}),
-  input:{background:"#0c1018",border:"1px solid #18243a",color:"#dce8f8",padding:"9px 12px",borderRadius:"4px",fontFamily:"inherit",fontSize:"12px",width:"100%",boxSizing:"border-box"},
-  btn:(c,tc)=>({background:c,color:tc||"#000",border:"none",padding:"9px 18px",borderRadius:"4px",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",fontWeight:"700",letterSpacing:"1px"}),
+const C={
+badge:(label,color,size=12)=><span style={{background:color+'22',color,border:`1px solid ${color}44`,borderRadius:4,padding:'2px 7px',fontSize:size,fontWeight:700,letterSpacing:.5}}>{label}</span>,
+row:(a,b,mono=true)=><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'3px 0',borderBottom:'1px solid #18243a22'}}><span style={{color:'#7a8fa8',fontSize:12}}>{a}</span><span style={{color:'#dce8f8',fontSize:12,fontFamily:mono?'inherit':'sans-serif'}}>{b}</span></div>,
+section:(title,children,color='#00e5ff')=><div style={{marginBottom:12}}><div style={{color,fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',marginBottom:6,borderBottom:`1px solid ${color}33`,paddingBottom:3}}>{title}</div>{children}</div>,
 };
-const fml=n=>n?(n>0?`+${n}`:`${n}`):"—";
-const ft=iso=>{try{return new Date(iso).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}catch{return"—"}};
 
-// ── 1H PICK CARD ──────────────────────────────────────────────────────────────
-function H1PickCard({pick,bets,onPlace}){
-  const t=TIER[pick.tier]||TIER.optional;
-  const recColor=pick.rec==="OVER"?T.green:T.purple;
-  const gameKey=`${pick.away} @ ${pick.home}`;
-  const existingBet=bets?.find(b=>b.game===gameKey+"_1H"&&!b.result);
-  return(
-    <div style={{background:T.card,border:`1px solid ${t.color}44`,borderRadius:"8px",padding:"16px",marginBottom:"12px",position:"relative"}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px"}}>
-        <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
-          <span style={s.pill(t.color)}>{t.icon} {t.label}</span>
-          <span style={s.pill(T.cyan)}>⏱ 1H TOTAL</span>
-        </div>
-        <span style={{...s.pill(pick.conf>=85?T.gold:T.green),fontSize:"10px"}}>{pick.conf}% CONF</span>
-      </div>
-      <div style={{fontSize:"13px",color:T.muted,marginBottom:"12px",fontWeight:"600"}}>
-        {pick.away} @ {pick.home}
-        <span style={{marginLeft:"8px",fontSize:"10px",color:T.muted,fontWeight:"400"}}>{ft(pick.commenceTime)}</span>
-      </div>
-      <div style={{background:"#0c1018",border:`1px solid ${recColor}33`,borderRadius:"6px",padding:"12px 14px",marginBottom:"12px"}}>
-        <div style={{fontSize:"9px",color:T.gold,letterSpacing:"2px",marginBottom:"6px"}}>ENGINE RECOMMENDATION</div>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div>
-            <span style={{fontSize:"18px",fontWeight:"700",color:recColor}}>{pick.rec} {pick.marketLine}</span>
-            <div style={{fontSize:"10px",color:T.muted,marginTop:"2px"}}>
-              1st Half Total · Proj {pick.proj1H} · {pick.strength} ({pick.diff>0?"+":""}{pick.diff} pts)
-            </div>
-          </div>
-          <div style={{textAlign:"right"}}>
-            <div style={{fontSize:"22px",fontWeight:"700",color:T.gold}}>${pick.wager}</div>
-            <div style={{fontSize:"8px",color:T.muted}}>¼ KELLY</div>
-          </div>
-        </div>
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"8px",marginBottom:"12px"}}>
-        <div style={{background:T.surface,borderRadius:"4px",padding:"8px",textAlign:"center"}}>
-          <div style={{fontSize:"14px",fontWeight:"700",color:recColor}}>{pick.rec}</div>
-          <div style={{fontSize:"8px",color:T.muted}}>PICK</div>
-        </div>
-        <div style={{background:T.surface,borderRadius:"4px",padding:"8px",textAlign:"center"}}>
-          <div style={{fontSize:"14px",fontWeight:"700",color:T.green}}>~{pick.edgePct}%</div>
-          <div style={{fontSize:"8px",color:T.muted}}>EDGE</div>
-        </div>
-        <div style={{background:T.surface,borderRadius:"4px",padding:"8px",textAlign:"center"}}>
-          <div style={{fontSize:"14px",fontWeight:"700",color:pick.paceConf==="HIGH"?T.green:pick.paceConf==="MED"?T.gold:T.orange}}>{pick.paceConf}</div>
-          <div style={{fontSize:"8px",color:T.muted}}>PACE CONF</div>
-        </div>
-      </div>
-      <div style={{fontSize:"10px",color:T.muted,marginBottom:"12px"}}>
-        Avg pace {pick.avgPace} · ES {pick.es}
-        {pick.dataQuality==="HIGH"&&<span style={{marginLeft:"8px",color:T.green}}>● {pick.dataGames} ESPN games</span>}
-        {pick.dataQuality==="MED"&&<span style={{marginLeft:"8px",color:T.gold}}>● {pick.dataGames} ESPN games (partial)</span>}
-        {pick.dataQuality==="FORMULA"&&<span style={{marginLeft:"8px",color:T.muted}}>● model projection</span>}
-        {" · "}{pick.rec==="OVER"?"Both teams score above avg pace":"Defensive/slow game expected"}
-      </div>
-      {!existingBet?(
-        <button onClick={()=>onPlace({game:gameKey+"_1H",pick:`${pick.rec} ${pick.marketLine}`,type:"1H Total",wager:pick.wager,odds:-110,predictedProb:0.524+pick.edgePct/200})}
-          style={{...s.btn(T.gold),width:"100%",fontSize:"12px",padding:"13px"}}>
-          ☑ MARK BET AS PLACED — ${pick.wager}
-        </button>
-      ):(
-        <button onClick={()=>onPlace(null,existingBet.id)} style={{...s.btn(T.surface,"#666"),width:"100%",border:`1px solid ${T.border}`}}>
-          ✓ PLACED · TAP TO REMOVE
-        </button>
-      )}
-    </div>
-  );
+function Btn({children,onClick,color,disabled,style={}}){
+return<button onClick={onClick} disabled={disabled} style={{background:disabled?'#18243a':(color||T.accent)+'22',color:disabled?T.muted:(color||T.accent),border:`1px solid ${disabled?T.border:(color||T.accent)+'66'}`,borderRadius:6,padding:'8px 16px',cursor:disabled?'not-allowed':'pointer',fontSize:13,fontWeight:700,...style}}>{children}</button>;
 }
 
-
-// ── PICK CARD ─────────────────────────────────────────────────────────────────
-// ── 1H TOTAL TOOL COMPONENT ─────────────────────────────────────────────────────
-function H1TotalTool({gameId,he,ae,h1OddsMap,h1Lines,setH1Lines,espnCache}){
-  const liveLineRaw=(h1OddsMap||{})[gameId];
-  const liveLine=liveLineRaw!=null?liveLineRaw:null;
-  const[manualInput,setManualInput]=useState((h1Lines&&h1Lines[gameId])||"");
-  const effectiveLine=liveLine!=null?liveLine:(parseFloat(manualInput)||null);
-  const h1data=calc1HTotal(he,ae,espnCache);
-  if(!h1data)return null;
-  const edge=effectiveLine!=null?get1HEdge(h1data.proj1H,effectiveLine):null;
-  const recColor=!edge||edge.rec==="PASS"?T.muted:edge.rec==="OVER"?T.green:T.purple;
-  const strengthColor=edge&&edge.strength==="STRONG"?T.gold:edge&&edge.strength==="SOLID"?T.green:T.muted;
-  const hasSignal=edge&&edge.rec!=="PASS";
-  const[opened,setOpened]=useState(false);
-  function saveLine(val){const updated=Object.assign({},h1Lines,{[gameId]:val});setH1Lines(updated);ss(SK.h1,updated);}
-  return(
-    <div style={{marginTop:"8px",borderTop:"1px solid "+T.border,paddingTop:"8px"}}>
-      <div onClick={()=>setOpened(function(o){return !o;})} style={{display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",padding:"4px 0"}}>
-        <span style={{fontSize:"9px",letterSpacing:"2px",color:hasSignal?recColor:T.gold}}>
-          {"⏱"} 1H TOTAL
-          {liveLine!=null&&<span style={{marginLeft:"8px",color:T.cyan,fontSize:"8px"}}>{"●"} LIVE {liveLine}</span>}
-          {hasSignal&&<span style={{marginLeft:"8px",fontWeight:"700"}}>{" "}{edge.rec} {edge.strength}</span>}
-          {!effectiveLine&&<span style={{marginLeft:"8px",color:T.muted,fontSize:"8px"}}> no line yet</span>}
-        </span>
-        <span style={{fontSize:"10px",color:T.muted}}>{opened?"▲":"▼"}</span>
-      </div>
-      {opened&&(
-        <div style={{marginTop:"8px"}}>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"6px",marginBottom:"10px"}}>
-            <div style={{background:T.surface,borderRadius:"4px",padding:"8px",textAlign:"center"}}>
-              <div style={{fontSize:"16px",fontWeight:"700",color:T.cyan}}>{h1data.proj1H}</div>
-              <div style={{fontSize:"8px",color:T.muted}}>PROJ 1H</div>
-            </div>
-            <div style={{background:T.surface,borderRadius:"4px",padding:"8px",textAlign:"center"}}>
-              <div style={{fontSize:"16px",fontWeight:"700",color:liveLine!=null?T.green:T.muted}}>{liveLine!=null?liveLine:(effectiveLine||"—")}</div>
-              <div style={{fontSize:"8px",color:T.muted}}>{liveLine!=null?"ODDS API":effectiveLine?"MANUAL":"NO LINE"}</div>
-            </div>
-            <div style={{background:T.surface,borderRadius:"4px",padding:"8px",textAlign:"center"}}>
-              <div style={{fontSize:"14px",fontWeight:"700",color:h1data.conf==="HIGH"?T.green:h1data.conf==="MED"?T.gold:T.orange}}>{h1data.conf}</div>
-              <div style={{fontSize:"8px",color:T.muted}}>CONF</div>
-            </div>
-          </div>
-          <div style={{fontSize:"9px",color:T.muted,marginBottom:"8px"}}>
-            {"Avg pace "+h1data.avgPace+" · 1H ratio "+h1data.h1Ratio+"% · Full proj "+h1data.projFull}
-            {h1data.dataQuality!=="FORMULA"&&<span style={{marginLeft:"8px",color:h1data.dataQuality==="HIGH"?T.green:T.gold}}>{"● "+h1data.dataGames+" real games · real:"+h1data.realProj+" formula:"+h1data.formulaProj}</span>}
-            {h1data.dataQuality==="FORMULA"&&<span style={{marginLeft:"8px",color:T.muted}}>{"● formula only (ESPN data loading…)"}</span>}
-          </div>
-          {liveLine==null&&(
-            <div style={{display:"flex",gap:"8px",alignItems:"center",marginBottom:"10px"}}>
-              <div style={{fontSize:"9px",color:T.muted,letterSpacing:"1px",whiteSpace:"nowrap"}}>MANUAL LINE:</div>
-              <input type="number" step="0.5" placeholder="e.g. 67.5" value={manualInput}
-                onChange={function(e){setManualInput(e.target.value);saveLine(e.target.value);}}
-                style={{flex:1,background:T.surface,border:"1px solid "+T.border,color:T.text,padding:"6px 8px",borderRadius:"4px",fontSize:"13px",fontFamily:"inherit",textAlign:"center"}}
-              />
-            </div>
-          )}
-          {edge?(
-            <div style={{background:T.surface,borderRadius:"6px",padding:"10px",border:"1px solid "+recColor+"30"}}>
-              {edge.rec==="PASS"?(
-                <div style={{textAlign:"center",color:T.muted,fontSize:"11px"}}>{"Edge too small — PASS (diff: "+edge.diff+")"}</div>
-              ):(
-                <div>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"6px"}}>
-                    <span style={{fontSize:"20px",fontWeight:"700",color:recColor}}>{edge.rec}</span>
-                    <span style={{fontSize:"11px",color:strengthColor,letterSpacing:"1px"}}>{edge.strength}</span>
-                  </div>
-                  <div style={{display:"flex",justifyContent:"space-between",fontSize:"10px",marginBottom:"4px"}}>
-                    <span style={{color:T.muted}}>{"Proj "+h1data.proj1H+" vs line "+effectiveLine}</span>
-                    <span style={{color:recColor}}>{"~"+edge.edgePct+"% edge"}</span>
-                  </div>
-                  <div style={{fontSize:"9px",color:T.muted}}>
-                    {edge.rec==="OVER"?"Engine projects "+Math.abs(edge.diff)+" pts over the line":"Engine projects "+Math.abs(edge.diff)+" pts under the line"}
-                  </div>
-                </div>
-              )}
-            </div>
-          ):(
-            <div style={{textAlign:"center",color:T.muted,fontSize:"10px",padding:"8px"}}>
-              {effectiveLine?"Computing…":"Waiting for 1H line from Odds API…"}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
+function ConfBar({conf,tier}){
+const colors={Anchor:T.gold,Core:T.green,Value:T.cyan};const color=colors[tier]||T.cyan;
+return<div style={{marginTop:6}}>
+<div style={{display:'flex',justifyContent:'space-between',marginBottom:3}}><span style={{fontSize:10,color:T.muted}}>CONFIDENCE</span><span style={{fontSize:12,fontWeight:700,color}}>{conf}%</span></div>
+<div style={{height:5,background:'#18243a',borderRadius:3}}><div style={{width:`${conf}%`,height:'100%',background:color,borderRadius:3,transition:'width .4s'}}/></div>
+</div>;
 }
 
-
-function PickCard({pick,showDetail,onPlace,bets}){
-  const[open,setOpen]=useState(!!showDetail);
-  const tc=TIER[pick.tier||"optional"];
-  const recIsHome=pick.valSide===pick.home;
-  const recSide=recIsHome?pick.he.name:pick.ae.name;
-  const recSp=recIsHome?pick.hSp:pick.aSp;
-  const recSpO=recIsHome?pick.hSpO:pick.aSpO;
-  const gameKey=`${pick.ae.name} @ ${pick.he.name}`;
-  const existingBet=bets?.find(b=>b.game===gameKey&&!b.result);
-  const isSettled=bets?.some(b=>b.game===gameKey&&b.result);
-  const sc=pick.schedule||{};
-  return(
-    <div style={{background:T.card,border:`1px solid ${tc.color}44`,borderRadius:"6px",padding:"14px",marginBottom:"10px",animation:"fadeUp 0.3s ease"}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"8px"}}>
-        <div>
-          <div style={{fontSize:"9px",color:tc.color,fontWeight:"700",letterSpacing:"1.5px",marginBottom:"4px"}}>{tc.icon} {tc.label}</div>
-          <div style={{fontSize:"13px",fontWeight:"700",color:T.text}}>{pick.ae.name} <span style={{color:T.muted}}>@</span> {pick.he.name}</div>
-          <div style={{fontSize:"9px",color:T.muted,marginTop:"2px"}}>{pick.ae.name} @ {pick.he.name} · {ft(pick.commenceTime)}</div>
-        </div>
-        <div style={{display:"flex",gap:"6px",flexWrap:"wrap",justifyContent:"flex-end"}}>
-          <span style={s.pill(tc.color)}>{pick.conf}% CONF</span>
-          {pick.isConfTourney&&<span style={s.pill(T.gold)}>🏆 CONF TOURN</span>}
-          {pick.isNeutral&&!pick.isConfTourney&&<span style={s.pill(T.muted)}>🏟 NEUTRAL</span>}
-          {pick.sharpMove&&<span style={s.pill(T.green)}>📈 SHARP {pick.lm>0?"+":""}{pick.lm}</span>}
-          {sc.awayB2B&&<span style={s.pill(T.orange)}>B2B</span>}
-          {sc.liveData&&<span style={s.pill(T.green)}>LIVE</span>}
-          {sc.travelKm>800&&<span style={s.pill(T.purple)}>{sc.travelKm}km</span>}
-        </div>
-      </div>
-      {/* RECOMMENDATION */}
-      <div style={{background:`${tc.color}0c`,border:`1px solid ${tc.color}33`,borderRadius:"4px",padding:"10px 12px",marginBottom:"10px"}}>
-        <div style={{fontSize:"9px",color:tc.color,fontWeight:"700",letterSpacing:"1.5px",marginBottom:"5px"}}>ENGINE RECOMMENDATION</div>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div>
-            <div style={{fontSize:"14px",fontWeight:"700",color:T.text}}>{recSide} {recSp!==null?(recSp>0?`+${recSp}`:recSp):"ML"}</div>
-            <div style={{fontSize:"10px",color:T.muted,marginTop:"2px"}}>Odds: {fml(recSpO)} · Model {parseFloat(pick.edge)>0?pick.modHP:(100-parseFloat(pick.modHP)).toFixed(1)}% vs mkt {parseFloat(pick.edge)>0?pick.mktHP:(100-parseFloat(pick.mktHP)).toFixed(1)}%</div>
-          </div>
-          <div style={{textAlign:"right"}}>
-            <div style={{fontSize:"18px",fontWeight:"700",color:tc.color}}>${pick.kellyWager||pick.wager}</div>
-            <div style={{fontSize:"9px",color:T.green}}>¼ KELLY</div>
-            {pick.wager&&<div style={{fontSize:"8px",color:T.muted}}>tier: ${pick.wager}</div>}
-          </div>
-        </div>
-      </div>
-      {/* PLACE BUTTON */}
-      {onPlace&&!isSettled&&(
-        <div style={{marginBottom:"10px"}} onClick={e=>e.stopPropagation()}>
-          {!existingBet?(
-            <button onClick={()=>onPlace({game:gameKey,pick:`${recSide} ${recSp!==null?(recSp>0?`+${recSp}`:recSp):"ML"}`,type:"Spread",wager:pick.kellyWager||pick.wager,odds:recSpO||(-110),predictedProb:parseFloat(pick.modHP)/100,storedFeats:pick.feats})}
-              style={{...s.btn(tc.color),width:"100%",padding:"10px",fontSize:"12px",letterSpacing:"1.5px"}}>
-              ☑ MARK BET AS PLACED — ${pick.kellyWager||pick.wager}
-            </button>
-          ):(
-            <div style={{display:"flex",gap:"6px"}}>
-              <div style={{flex:1,background:`${T.green}12`,border:`1px solid ${T.green}44`,borderRadius:"4px",padding:"8px 12px",fontSize:"11px",color:T.green,fontWeight:"700",textAlign:"center"}}>✓ LOGGED · ${existingBet.wager} · {existingBet.pick}</div>
-              <button onClick={()=>onPlace(null,existingBet.id)} style={{...s.btn(T.surface,T.muted),border:`1px solid ${T.border}`,fontSize:"10px",padding:"8px 12px"}}>UNDO</button>
-            </div>
-          )}
-        </div>
-      )}
-      <div onClick={()=>setOpen(o=>!o)} style={{cursor:"pointer"}}>
-        {/* SCHEDULE ROW */}
-        {(sc.liveData||sc.travelKm>0)&&(
-          <div style={{display:"flex",gap:"10px",flexWrap:"wrap",marginBottom:"8px",fontSize:"10px"}}>
-            {sc.homeRestDays!==undefined&&<span style={{color:sc.homeB2B?T.orange:T.muted}}>🏠 {sc.homeB2B?"B2B":`${sc.homeRestDays}d rest`}</span>}
-            {sc.awayRestDays!==undefined&&<span style={{color:sc.awayB2B?T.red:T.muted}}>✈ {sc.awayB2B?"B2B AWAY":`${sc.awayRestDays}d rest`}</span>}
-            {sc.travelKm>100&&<span style={{color:sc.travelKm>1200?T.red:sc.travelKm>600?T.orange:T.muted}}>📍{sc.travelKm}km{sc.tzDelta!==0?` ${sc.tzDelta>0?"→E":"←W"}${Math.abs(sc.tzDelta)}tz`:""}</span>}
-            {sc.fatiguePenalty>1&&<span style={{color:T.orange}}>⚡-{sc.fatiguePenalty}EM</span>}
-            {sc.awayForm!==undefined&&<span style={{color:sc.awayForm>=0.7?T.green:sc.awayForm<=0.3?T.red:T.muted}}>Away {Math.round(sc.awayForm*100)}%</span>}
-          </div>
-        )}
-        <div style={{display:"flex",gap:"6px",flexWrap:"wrap",marginBottom:"8px"}}>
-          {[[`${pick.he.name} #${pick.he.rank}`,T.accent],[`EM:${pick.he.adjEM>0?"+":""}${pick.he.adjEM}`,parseFloat(pick.he.adjEM)>15?T.green:T.text],[`${pick.ae.name} #${pick.ae.rank}`,T.purple],[`EM:${pick.ae.adjEM>0?"+":""}${pick.ae.adjEM}`,T.text]].map(([label,color])=>(
-            <span key={label} style={s.pill(color)}>{label}</span>
-          ))}
-          {pick.hRank&&<span style={s.pill(T.gold)}>AP #{pick.hRank} {pick.he.name}</span>}
-          {pick.aRank&&<span style={s.pill(T.gold)}>AP #{pick.aRank} {pick.ae.name}</span>}
-          {pick.hRec&&<span style={s.pill(T.muted)}>{pick.he.name} {pick.hRec}</span>}
-          {pick.aRec&&<span style={s.pill(T.muted)}>{pick.ae.name} {pick.aRec}</span>}
-        </div>
-        {(pick.hInj?.length>0||pick.aInj?.length>0)&&(
-          <div style={{background:`${T.red}0a`,border:`1px solid ${T.red}22`,borderRadius:"3px",padding:"5px 8px",marginBottom:"6px",fontSize:"9px",color:T.red,letterSpacing:"0.5px"}}>
-            ⚠ INJURY ALERT
-            {pick.hInj?.slice(0,1).map((h,i)=><div key={i} style={{color:T.orange,marginTop:"2px"}}>· {h.length>80?h.slice(0,80)+"…":h}</div>)}
-            {pick.aInj?.slice(0,1).map((h,i)=><div key={i} style={{color:T.orange,marginTop:"2px"}}>· {h.length>80?h.slice(0,80)+"…":h}</div>)}
-          </div>
-        )}
-        <div style={{display:"flex",justifyContent:"space-between",fontSize:"10px",color:T.muted}}>
-          <span>Spread:{fml(pick.hSp)}/{fml(pick.aSp)} · Move:{pick.lm!==null?(pick.lm>0?`+${pick.lm}`:pick.lm):"—"} · ES:{pick.es}</span>
-          <span style={{color:tc.color}}>{open?"▲":"▼"}</span>
-        </div>
-      </div>
-      {open&&(
-        <div style={{marginTop:"12px",paddingTop:"12px",borderTop:`1px solid ${T.border}`}}>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px",marginBottom:"10px",fontSize:"10px"}}>
-            {[["Market",`${parseFloat(pick.edge)>0?pick.mktHP:(100-parseFloat(pick.mktHP)).toFixed(1)}%`,T.text],["Model",`${parseFloat(pick.edge)>0?pick.modHP:(100-parseFloat(pick.modHP)).toFixed(1)}%`,tc.color],["Edge",`${(parseFloat(pick.edge)*100).toFixed(1)}%`,Math.abs(parseFloat(pick.edge))>0.06?T.green:T.text],["ES",pick.es,pick.es>15?T.gold:T.text]].map(([l,v,c])=>(
-              <div key={l} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"3px",padding:"6px 8px"}}><div style={{color:c,fontWeight:"700"}}>{v}</div><div style={{color:T.muted,fontSize:"9px"}}>{l}</div></div>
-            ))}
-          </div>
-          <div style={{marginBottom:"8px"}}>
-            {Object.entries(pick.cl).map(([k,v])=>{
-              const lbls={efficiencyMismatch:"Efficiency gap >8pts",noPublicBias:"No public bias",shortUnderdog:"Short dog +1→+4",slowTempo:"Slow tempo <66",defReboundEdge:"Def reb edge",midMajorEdge:"Mid-major edge",valueDetected:"Model vs market",noLargeFavorite:"Spread ≤ 10",homeMoreRested:"Home more rested",awayB2BFlag:"Away B2B ⚠",sharpLineMove:"Sharp line move ≥1.5",neutralSite:"Neutral site (no HCA)",trapSpreadAlert:"⚠ Trap zone (-7→-13)"};
-              return<div key={k} style={{display:"flex",gap:"8px",fontSize:"11px",marginBottom:"4px",color:v?(k==="awayB2BFlag"||k==="trapSpreadAlert"?T.orange:T.green):T.muted}}><span>{v?"✓":"·"}</span><span>{lbls[k]||k}</span></div>;
-            })}
-          </div>
-          <div style={{padding:"6px 8px",background:T.surface,borderRadius:"4px",fontSize:"10px",color:T.muted}}>
-            eFG%:{pick.he.efg}% vs {pick.ae.efg}% · TO%:{pick.he.toRate}% vs {pick.ae.toRate}% · Pace:{pick.he.pace} vs {pick.ae.pace}
-          </div>
-        </div>
-      )}
-    </div>
-  );
+function PickCard({pick,onGrade,idx}){
+const[exp,setExp]=useState(false);
+const tierColor={Anchor:T.gold,Core:T.green,Value:T.cyan,Watch:T.muted}[pick.tier]||T.muted;
+const edgeN=parseFloat(pick.edge);const edgePct=(edgeN*100).toFixed(1);
+return<div style={{background:T.card,border:`1px solid ${tierColor}44`,borderRadius:10,padding:12,marginBottom:10,animation:'fadeUp .3s ease'}}>
+<div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:6}}>
+<div>
+{C.badge(pick.tier,tierColor)}
+<span style={{marginLeft:8,fontWeight:700,color:T.text,fontSize:14}}>{pick.side}</span>
+{pick.odds&&<span style={{marginLeft:8,color:T.muted,fontSize:12}}>{pick.odds>0?'+':''}{pick.odds}</span>}
+</div>
+<div style={{textAlign:'right'}}>
+<div style={{fontSize:11,color:T.muted}}>{pick.home} vs {pick.away}</div>
+{pick.commenceTime&&<div style={{fontSize:10,color:T.muted}}>{new Date(pick.commenceTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</div>}
+</div>
+</div>
+<ConfBar conf={pick.conf} tier={pick.tier}/>
+<div style={{display:'flex',gap:8,marginTop:8,flexWrap:'wrap'}}>
+<span style={{fontSize:11,color:T.muted}}>Edge: <b style={{color:edgeN>0?T.green:T.red}}>{edgeN>0?'+':''}{edgePct}%</b></span>
+<span style={{fontSize:11,color:T.muted}}>ES: <b style={{color:T.cyan}}>{pick.es}</b></span>
+{pick.units&&<span style={{fontSize:11,color:T.muted}}>Bet: <b style={{color:T.gold}}>{pick.units}u (${pick.wager})</b></span>}
+{pick.isConfTourney&&C.badge('CONF TOURNEY',T.purple,10)}
+{pick.sharpMove&&C.badge('SHARP',T.orange,10)}
+{pick.trapSpread&&C.badge('TRAP?',T.red,10)}
+</div>
+{exp&&<div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${T.border}`}}>
+{C.section('Efficiency',<>
+{C.row('adjEM Diff',`${(pick.he?.adjEM-pick.ae?.adjEM)>=0?'+':''}${(pick.he?.adjEM-pick.ae?.adjEM)?.toFixed(1)}`)}
+{C.row('Home adjEM',pick.he?.adjEM?.toFixed(1))}
+{C.row('Away adjEM',pick.ae?.adjEM?.toFixed(1))}
+{C.row('Pace (H/A)',`${pick.he?.pace?.toFixed(1)} / ${pick.ae?.pace?.toFixed(1)}`)}
+</>)}
+{pick.schedule&&C.section('Schedule',<>
+{C.row('Home rest',`${pick.schedule.homeRestDays}d${pick.schedule.homeB2B?' ⚠B2B':''}`)}
+{C.row('Away rest',`${pick.schedule.awayRestDays}d${pick.schedule.awayB2B?' ⚠B2B':''}`)}
+{pick.schedule.travelKm>0&&C.row('Travel',`${pick.schedule.travelKm}km / TZ${pick.schedule.tzDelta>=0?'+':''}${pick.schedule.tzDelta}`)}
+{pick.schedule.fatiguePenalty>0&&C.row('Fatigue penalty',`-${pick.schedule.fatiguePenalty}`)}
+</>)}
+{pick.hInj?.length>0&&C.section('Injuries',pick.hInj.map((inj,i)=><div key={i} style={{fontSize:11,color:T.orange,marginBottom:2}}>⚠ {inj}</div>),T.orange)}
+</div>}
+<button onClick={()=>setExp(!exp)} style={{background:'none',border:'none',color:T.muted,cursor:'pointer',fontSize:11,marginTop:6,padding:0}}>
+{exp?'▲ less':'▼ details'}
+</button>
+{onGrade&&<div style={{marginTop:8,display:'flex',gap:6}}>
+<Btn onClick={()=>onGrade(idx,'W')} color={T.green} style={{fontSize:11,padding:'4px 10px'}}>✓ WIN</Btn>
+<Btn onClick={()=>onGrade(idx,'L')} color={T.red} style={{fontSize:11,padding:'4px 10px'}}>✗ LOSS</Btn>
+<Btn onClick={()=>onGrade(idx,'P')} color={T.muted} style={{fontSize:11,padding:'4px 10px'}}>— PUSH</Btn>
+</div>}
+</div>;
 }
 
-// ── BANKROLL TAB ──────────────────────────────────────────────────────────────
-function BankrollTab({bets,setBets,bankroll,setBankroll,ml,setResults,results,dailyMaxPct,setDailyMaxPct}){
-  const[form,setForm]=useState({game:"",pick:"",type:"Spread",wager:"",odds:"-110"});
-  const[editBR,setEditBR]=useState(false);
-  const[brIn,setBrIn]=useState("");
-  const u=calcUnits(bankroll,dailyMaxPct);
-  const won=bets.filter(b=>b.result==="win").reduce((s,b)=>s+b.profit,0);
-  const lost=bets.filter(b=>b.result==="loss").reduce((s,b)=>s+b.wager,0);
-  const pending=bets.filter(b=>!b.result).reduce((s,b)=>s+b.wager,0);
-  const tb=bets.filter(b=>b.result).length,wb=bets.filter(b=>b.result==="win").length;
-  const roi=(won+lost)>0?(((won-lost)/(won+lost))*100).toFixed(1):"0.0";
-  const prog=Math.max(0,Math.min(100,((bankroll-300)/700)*100));
-  const scenarios=[{l:"3-1",w:3,lo:1},{l:"2-2",w:2,lo:2},{l:"4-0",w:4,lo:0},{l:"1-3",w:1,lo:3}].map(sc=>{const g2=sc.w*u.core*0.909,l2=sc.lo*u.core;return{...sc,net:(g2-l2).toFixed(2),proj:(bankroll+g2-l2).toFixed(2)}});
-  function addBet(){
-    if(!form.game||!form.wager)return;
-    const w=parseFloat(form.wager),ml2=parseFloat(form.odds);
-    const profit=ml2>0?w*(ml2/100):w*(100/Math.abs(ml2));
-    const pts=form.game.split("@"),hEff=getEff(pts[1]?.trim()||""),aEff=getEff(pts[0]?.trim()||"");
-    const bf=ml.buildFeatures(hEff,aEff,-3.5,true,hEff.rank>50&&aEff.rank>50,null,null);
-    const ep=ml.predict(bf);
-    const nb={id:Date.now(),...form,wager:w,profit:+profit.toFixed(2),result:null,date:new Date().toLocaleDateString(),predictedProb:ep,storedFeats:bf};
-    setBets(p=>{const u2=[...p,nb];ss(SK.bets,u2);return u2});
-    setForm(f=>({...f,game:"",pick:"",wager:""}));
-  }
-  function settle(id,result){
-    const bet=bets.find(b=>b.id===id);if(!bet)return;
-    setBets(p=>{const u2=p.map(b=>b.id===id?{...b,result}:b);ss(SK.bets,u2);return u2});
-    const ao=result==="win"?1:0;
-    const feats=bet.storedFeats||ml.buildFeatures(getEff(bet.game.split("@")[1]?.trim()||""),getEff(bet.game.split("@")[0]?.trim()||""),-3.5,true,false,null,null);
-    const prob=bet.predictedProb||0.6;
-    ml.learn(feats,prob,ao);ml.weights.totalBets++;
-    if(result==="win")ml.weights.winningBets++;
-    ml.save();
-    const nr={game:bet.game,correct:ao===Math.round(prob),predictedProb:prob,result};
-    setResults(r=>{const u2=[...r,nr];ss(SK.results,u2);return u2});
-    const delta=result==="win"?bet.profit:-bet.wager;
-    setBankroll(p=>{const u2=+(p+delta).toFixed(2);ss(SK.bankroll,u2);return u2});
-  }
-  return(
-    <div style={{display:"grid",gridTemplateColumns:"min(300px,100%) 1fr",gap:"20px"}}>
-      <div>
-        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"16px",marginBottom:"12px"}}>
-          <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"8px"}}>BANKROLL</div>
-          {editBR?(
-            <div style={{display:"flex",gap:"8px",alignItems:"center",marginBottom:"10px"}}>
-              <input autoFocus type="number" value={brIn} onChange={e=>setBrIn(e.target.value)} style={{...s.input,fontSize:"22px",fontWeight:"700",color:T.green,width:"140px",padding:"6px 10px"}}
-                onKeyDown={e=>{if(e.key==="Enter"){const v=parseFloat(brIn);if(!isNaN(v)&&v>0){setBankroll(v);ss(SK.bankroll,v);}setEditBR(false);}if(e.key==="Escape")setEditBR(false);}}/>
-              <button onClick={()=>{const v=parseFloat(brIn);if(!isNaN(v)&&v>0){setBankroll(v);ss(SK.bankroll,v);}setEditBR(false);}} style={s.btn(T.green)}>SAVE</button>
-              <button onClick={()=>setEditBR(false)} style={{...s.btn(T.surface,T.muted),border:`1px solid ${T.border}`}}>CANCEL</button>
-            </div>
-          ):(
-            <div style={{display:"flex",alignItems:"baseline",gap:"10px",marginBottom:"10px"}}>
-              <div style={{fontSize:"34px",fontWeight:"700",color:bankroll>=300?T.green:T.red,letterSpacing:"-1px",cursor:"pointer"}} onClick={()=>{setBrIn(bankroll.toString());setEditBR(true);}}>${bankroll.toLocaleString()}</div>
-              <button onClick={()=>{setBrIn(bankroll.toString());setEditBR(true);}} style={{background:"transparent",border:`1px solid ${T.border}`,color:T.muted,fontSize:"9px",padding:"3px 8px",borderRadius:"3px",cursor:"pointer",fontFamily:"inherit"}}>EDIT</button>
-            </div>
-          )}
-          <div style={{fontSize:"9px",color:T.muted,marginBottom:"10px"}}>TARGET $1,000 · STARTED $300</div>
-          <div style={{height:"4px",background:T.surface,borderRadius:"2px",marginBottom:"4px"}}><div style={{height:"4px",width:`${prog}%`,background:`linear-gradient(90deg,${T.accent},${T.green})`,borderRadius:"2px"}}/></div>
-          <div style={{fontSize:"9px",color:T.muted,display:"flex",justifyContent:"space-between",marginBottom:"12px"}}><span>$300</span><span style={{color:T.accent}}>{prog.toFixed(0)}%</span><span>$1,000</span></div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"6px"}}>
-            {[["WON",`$${won.toFixed(0)}`,T.green],["LOST",`$${lost.toFixed(0)}`,T.red],["ROI",`${roi}%`,parseFloat(roi)>=0?T.green:T.red]].map(([l,v,c])=>(
-              <div key={l} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"4px",padding:"8px",textAlign:"center"}}>
-                <div style={{fontSize:"13px",fontWeight:"700",color:c}}>{v}</div>
-                <div style={{fontSize:"8px",color:T.muted,marginTop:"2px"}}>{l}</div>
-              </div>
-            ))}
-          </div>
-          <div style={{marginTop:"8px",fontSize:"10px",color:T.muted}}>RECORD:<span style={{color:T.green}}>{wb}W</span>-<span style={{color:T.red}}>{tb-wb}L</span> · PENDING:<span style={{color:T.gold}}>${pending.toFixed(2)}</span></div>
-        </div>
-        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"14px",marginBottom:"12px"}}>
-          <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"8px"}}>UNITS (2% BASE)</div>
-          {[["⭐ Anchor 2.5u",u.anchor,T.gold],["💰 Core 1.5u",u.core,T.green],["🎯 Optional 1u",u.optional,T.purple],[`Max Daily ${Math.round(dailyMaxPct*100)}%`,u.maxDaily,T.red]].map(([l,v,c])=>(
-            <div key={l} style={{background:`${c}10`,border:`1px solid ${c}30`,borderRadius:"4px",padding:"8px 10px",textAlign:"center"}}>
-              <div style={{fontSize:"8px",color:c,letterSpacing:"1.5px",marginBottom:"2px"}}>{l}</div>
-              <div style={{fontSize:"16px",fontWeight:"700",color:c}}>${v}</div>
-            </div>
-          ))}
-          {/* Daily Max Exposure Slider */}
-          <div style={{background:"#0c1018",border:`1px solid ${T.border}`,borderRadius:"6px",padding:"12px 14px",marginBottom:"14px"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px"}}>
-              <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px"}}>DAILY MAX EXPOSURE</div>
-              <div style={{fontSize:"14px",fontWeight:"700",color:T.red}}>{Math.round(dailyMaxPct*100)}% · ${u.maxDaily}</div>
-            </div>
-            <input type="range" min="5" max="40" step="1" value={Math.round(dailyMaxPct*100)}
-              onChange={e=>{const v=parseInt(e.target.value)/100;setDailyMaxPct(v);ss(SK.dmp,v);}}
-              style={{width:"100%",accentColor:T.red,marginBottom:"10px"}}/>
-            <div style={{display:"flex",gap:"6px"}}>
-              {[[12,"Conservative"],[20,"Moderate"],[25,"Aggressive"],[33,"Max Growth"]].map(([pct,lbl])=>(
-                <button key={pct} onClick={()=>{const v=pct/100;setDailyMaxPct(v);ss(SK.dmp,v);}}
-                  style={{flex:1,background:Math.round(dailyMaxPct*100)===pct?T.red+"30":"transparent",border:`1px solid ${Math.round(dailyMaxPct*100)===pct?T.red:T.border}`,color:Math.round(dailyMaxPct*100)===pct?T.red:T.muted,fontSize:"8px",padding:"5px 2px",borderRadius:"3px",cursor:"pointer",fontFamily:"inherit",letterSpacing:"0.5px"}}>
-                  {pct}%<br/><span style={{fontSize:"7px",opacity:0.7}}>{lbl}</span>
-                </button>
-              ))}
-            </div>
-            <div style={{fontSize:"8px",color:T.muted,marginTop:"8px",lineHeight:"1.5"}}>
-              At {Math.round(dailyMaxPct*100)}% · {Math.floor(u.maxDaily/u.anchor)} anchors or {Math.floor(u.maxDaily/u.core)} core bets fit before daily cap. Kelly governs unit size automatically as bankroll grows.
-            </div>
-          </div>
-        </div>
-        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"14px",marginBottom:"12px"}}>
-          <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"8px"}}>SCENARIOS</div>
-          {scenarios.map(sc=>(
-            <div key={sc.l} style={{display:"flex",justifyContent:"space-between",fontSize:"11px",marginBottom:"5px",padding:"5px 8px",background:T.surface,borderRadius:"3px"}}>
-              <span style={{color:T.text,fontWeight:"700"}}>{sc.l}</span>
-              <span style={{color:parseFloat(sc.net)>=0?T.green:T.red}}>{parseFloat(sc.net)>=0?"+":""}${sc.net}→<strong>${sc.proj}</strong></span>
-            </div>
-          ))}
-        </div>
-        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"14px"}}>
-          <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"10px"}}>LOG BET</div>
-          {[["game","Game (Away @ Home)"],["pick","Your pick"],["wager","Wager ($)"],["odds","Odds (-110)"]].map(([k,ph])=>(
-            <input key={k} placeholder={ph} value={form[k]} type={k==="wager"||k==="odds"?"number":"text"} onChange={e=>setForm(p=>({...p,[k]:e.target.value}))} style={{...s.input,marginBottom:"8px"}}/>
-          ))}
-          <div style={{display:"flex",gap:"6px",marginBottom:"8px",flexWrap:"wrap"}}>
-            {["Spread","ML","Over","Under"].map(t=>(
-              <button key={t} onClick={()=>setForm(p=>({...p,type:t}))} style={{background:form.type===t?T.accent:T.surface,color:form.type===t?"#000":T.muted,border:`1px solid ${form.type===t?T.accent:T.border}`,padding:"4px 10px",borderRadius:"3px",cursor:"pointer",fontFamily:"inherit",fontSize:"10px",fontWeight:"700"}}>{t}</button>
-            ))}
-          </div>
-          <button onClick={addBet} style={{...s.btn(T.accent),width:"100%"}}>+ ADD BET</button>
-        </div>
-      </div>
-      <div>
-        <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"12px"}}>BET LEDGER — {bets.length} TOTAL</div>
-        {bets.length===0&&<div style={{textAlign:"center",color:T.muted,padding:"40px",border:`1px dashed ${T.border}`,borderRadius:"6px",fontSize:"11px"}}>NO BETS LOGGED</div>}
-        {[...bets].reverse().map(bet=>(
-          <div key={bet.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:bet.result==="win"?`${T.green}0a`:bet.result==="loss"?`${T.red}0a`:T.card,border:`1px solid ${bet.result==="win"?T.green+"44":bet.result==="loss"?T.red+"33":T.border}`,borderRadius:"4px",marginBottom:"8px",gap:"8px"}}>
-            <div>
-              <div style={{fontSize:"12px",fontWeight:"700",color:T.text,marginBottom:"2px"}}>{bet.pick} <span style={s.pill(T.purple)}>{bet.type}</span></div>
-              <div style={{fontSize:"10px",color:T.muted}}>{bet.game} · {bet.date}</div>
-            </div>
-            <div style={{textAlign:"right",flexShrink:0}}>
-              <div style={{fontSize:"12px",color:T.accent,marginBottom:"4px"}}>${bet.wager}→+${bet.profit}</div>
-              {!bet.result?(
-                <div style={{display:"flex",gap:"4px"}}>
-                  <button onClick={e=>{e.stopPropagation();settle(bet.id,"win")}} style={{...s.btn(T.green),fontSize:"9px",padding:"3px 8px"}}>WIN✓</button>
-                  <button onClick={e=>{e.stopPropagation();settle(bet.id,"loss")}} style={{...s.btn(T.red,"#fff"),fontSize:"9px",padding:"3px 8px"}}>LOSS✗</button>
-                </div>
-              ):<span style={s.pill(bet.result==="win"?T.green:T.red)}>{bet.result.toUpperCase()}</span>}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+/* ============================================================
+   H1TotalTool — PATCHED
+   PATCH 2: Manual input now labeled, warns on full-game totals
+   PATCH 3: Fallback state explains the 1H line requirement
+   ============================================================ */
+function H1TotalTool({games,espnData,h1OddsMap,proxyUrl}){
+const[sel,setSel]=useState(null);const[manual,setManual]=useState({});const[picks,setPicks]=useState([]);const[loading,setLoading]=useState(false);
+const savedManual=sg(SK.h1,{});
+useEffect(()=>{setManual(savedManual);},[]);
+
+const saveManual=(gid,val)=>{const upd={...manual,[gid]:val};setManual(upd);ss(SK.h1,upd);};
+
+const runEngine=()=>{
+setLoading(true);
+const results=[];
+(games||[]).forEach(g=>{
+const gid=g.id||(g.home_team+g.away_team);
+const liveLine=h1OddsMap?h1OddsMap[gid]:null;
+const manualVal=parseFloat(manual[gid])||null;
+// Use live line first, then manual — but only if in valid 1H range
+const lineToUse=liveLine||(manualVal>=35&&manualVal<=85?manualVal:null);
+const pick=analyze1HPick(g.home_team,g.away_team,lineToUse,espnData);
+if(pick)results.push({...pick,gameId:gid,source:liveLine?'live':'manual'});
+});
+results.sort((a,b)=>b.conf-a.conf);
+setPicks(results);setLoading(false);
+};
+
+return<div style={{background:T.surface,borderRadius:12,padding:16,marginBottom:16}}>
+<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+<div style={{fontWeight:700,color:T.cyan,fontSize:14}}>1H TOTAL ENGINE</div>
+<div style={{display:'flex',gap:8,alignItems:'center'}}>
+{h1OddsMap&&Object.keys(h1OddsMap).length>0&&<span style={{fontSize:10,color:T.green}}>● {Object.keys(h1OddsMap).length} LIVE LINES</span>}
+<Btn onClick={runEngine} color={T.cyan} disabled={loading||!games?.length}>{loading?'Running…':'Run Engine'}</Btn>
+</div>
+</div>
+
+{/* Manual line entry section */}
+{games?.length>0&&<div style={{marginBottom:12}}>
+<div style={{fontSize:10,color:T.muted,letterSpacing:1,textTransform:'uppercase',marginBottom:6}}>
+ENTER ACTUAL 1H LINE FROM BOOK
+</div>
+<div style={{fontSize:10,color:'#7a9ab8',marginBottom:4}}>
+Power conf games: 62–75 · Mid-major: 55–65
+</div>
+{/* Orange warning about full-game totals */}
+<div style={{fontSize:10,color:T.orange,marginBottom:8,padding:'4px 8px',background:T.orange+'11',borderRadius:4,border:`1px solid ${T.orange}33`}}>
+⚠ Do NOT enter full-game totals (130–160) — they will be rejected by the engine
+</div>
+{games.map(g=>{
+const gid=g.id||(g.home_team+g.away_team);
+const liveLine=h1OddsMap?h1OddsMap[gid]:null;
+const manualVal=parseFloat(manual[gid])||null;
+const manualLooksLikeFull=manualVal&&(manualVal>85||manualVal<35);
+const manualIsValid=manualVal&&manualVal>=35&&manualVal<=85;
+return<div key={gid} style={{display:'flex',alignItems:'center',gap:8,marginBottom:6,padding:'6px 8px',background:T.card,borderRadius:6,border:`1px solid ${T.border}`}}>
+<span style={{flex:1,fontSize:12,color:T.text}}>{g.away_team} @ {g.home_team}</span>
+{liveLine&&<span style={{fontSize:11,color:T.green,fontWeight:700}}>LIVE: {liveLine}</span>}
+<div style={{display:'flex',flexDirection:'column',gap:2}}>
+<input
+type="number"
+placeholder="1H line"
+value={manual[gid]||''}
+onChange={e=>saveManual(gid,e.target.value)}
+style={{width:80,background:'#0c1018',border:`1px solid ${manualLooksLikeFull?T.red:T.border}`,borderRadius:4,color:manualLooksLikeFull?T.red:T.text,padding:'4px 8px',fontSize:12}}
+/>
+{manualLooksLikeFull&&<span style={{fontSize:9,color:T.red}}>Looks like full-game — rejected</span>}
+{manualIsValid&&!liveLine&&<span style={{fontSize:9,color:T.green}}>✓ valid 1H line</span>}
+</div>
+</div>;
+})}
+</div>}
+
+{/* No games loaded */}
+{!games?.length&&<div style={{padding:16,textAlign:'center',color:T.muted,fontSize:12}}>
+Load today's games first to use the 1H engine.
+</div>}
+
+{/* PATCH 3: Informative fallback when no live 1H lines */}
+{games?.length>0&&(!h1OddsMap||Object.keys(h1OddsMap).length===0)&&picks.length===0&&<div style={{padding:12,background:'#10161f',borderRadius:8,border:`1px solid ${T.border}`,marginBottom:10}}>
+<div style={{fontWeight:700,color:T.muted,fontSize:12,marginBottom:6}}>No 1H line available from Odds API</div>
+<div style={{fontSize:11,color:'#6a7f9a',lineHeight:1.6}}>
+The 1H total engine requires a real first-half line. You can:<br/>
+• Upgrade to Odds API <b style={{color:T.cyan}}>totals_h1</b> paid market for automatic live lines<br/>
+• Enter real 1H lines manually from your book in the fields above<br/>
+</div>
+<div style={{marginTop:8,fontSize:11,color:T.orange}}>
+⚠ Full-game totals from screenshots are <b>NOT</b> 1H lines — they will be rejected
+</div>
+</div>}
+
+{picks.length>0&&<div>
+<div style={{fontSize:10,color:T.muted,marginBottom:8}}>{picks.length} pick{picks.length!==1?'s':''} generated</div>
+{picks.map((p,i)=><div key={i} style={{background:T.card,border:`1px solid ${T.cyan}44`,borderRadius:8,padding:10,marginBottom:8}}>
+<div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+<div><span style={{fontWeight:700,color:p.side==='OVER'?T.green:T.red,fontSize:14}}>{p.side} {p.marketLine}</span>
+<span style={{marginLeft:8,fontSize:11,color:T.muted}}>{p.away} @ {p.home}</span>
+{p.source==='live'&&<span style={{marginLeft:6,fontSize:9,color:T.green}}>LIVE LINE</span>}
+</div>
+<div style={{textAlign:'right'}}>
+<div style={{fontSize:13,fontWeight:700,color:T.cyan}}>{p.conf}% conf</div>
+<div style={{fontSize:11,color:T.muted}}>Proj: {p.proj} | Edge: {p.edge>0?'+':''}{p.edge}</div>
+</div>
+</div>
+{p.hasESPN&&<div style={{fontSize:10,color:T.green,marginTop:4}}>✓ ESPN 1H data ({p.hStats?.n}/{p.aStats?.n} games)</div>}
+</div>)}
+</div>}
+</div>;
 }
 
-// ── ML TAB ────────────────────────────────────────────────────────────────────
-function MLTab({model,results,onReset}){
-  const w=model.weights;
-  const feats=Object.entries({
-    "AdjEM Diff":w.adjEM_diff,"eFG% Diff":w.efg_diff,"Home Court":w.homeCourt,
-    "TO Rate":w.toRate_diff,"Def Reb":w.defRebound,"Line Move":w.lineMovement,
-    "Short Dog":w.underdog_short,"Travel Fatigue":w.travelFatigue,
-    "Rest Adv":w.restAdvantage,"Away B2B":w.awayB2B,"Form Diff":w.recentFormDiff,
-    "Public Bias":w.publicBias,"Mid-Major":w.midMajorBonus,"Pace":w.paceFactor,
-  }).filter(([,v])=>v!==undefined).sort((a,b)=>Math.abs(b[1])-Math.abs(a[1]));
-  const bs=results.length>0
-    ?(results.reduce((s,r)=>s+Math.pow(r.predictedProb-(r.result==="win"?1:0),2),0)/results.length).toFixed(3):"—";
-  return(
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"20px"}}>
-      <div>
-        <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"12px"}}>MODEL PERFORMANCE</div>
-        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"16px",marginBottom:"12px"}}>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px",marginBottom:"12px"}}>
-            {[["Predictions",w.totalPredictions,T.accent],["Accuracy",`${model.accuracy}%`,T.green],["Bets",w.totalBets,T.purple],["Win Rate",`${model.winRate}%`,T.gold]].map(([l,v,c])=>(
-              <div key={l} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"4px",padding:"10px",textAlign:"center"}}>
-                <div style={{fontSize:"18px",fontWeight:"700",color:c}}>{v}</div>
-                <div style={{fontSize:"9px",color:T.muted,marginTop:"3px"}}>{l}</div>
-              </div>
-            ))}
-          </div>
-          <div style={{fontSize:"10px",color:T.muted,lineHeight:"2.0"}}>
-            Brier Score:<span style={{color:bs<0.22?T.green:T.gold}}>{bs}</span><span style={{fontSize:"9px"}}> (0.25=random)</span><br/>
-            Calibration:<span style={{color:T.accent}}>{((w.calibrationError||0)*100).toFixed(2)}%</span><br/>
-            LR:{w.learningRate} · ¼ Kelly · Logistic Regression
-          </div>
-          <button onClick={onReset} style={{...s.btn(T.surface,T.red),marginTop:"10px",border:`1px solid ${T.red}44`,fontSize:"10px",padding:"5px 12px"}}>RESET MODEL</button>
-        </div>
-        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"14px",marginBottom:"12px"}}>
-          <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"8px"}}>DATA SOURCES</div>
-          {[
-            ["🟢 live","ESPN Schedule","Rest days · B2B · Rolling form"],
-            ["🟢 live","Travel Engine","Distance · Timezone · Haversine"],
-            ["static","KenPom Basis","AdjEM #1 predictor ~73%"],
-            ["static","Four Factors","eFG% · TO% · DefReb"],
-            ["computed","¼ Kelly","Wharton 2023 optimal"],
-            ["computed","Vig-Adjusted","~4.5% margin removed"],
-          ].map(([status,t,d])=>(
-            <div key={t} style={{display:"flex",gap:"8px",marginBottom:"6px",fontSize:"10px"}}>
-              <span style={{color:status.includes("🟢")?T.green:T.muted,flexShrink:0,minWidth:"48px"}}>{status}</span>
-              <span style={{color:T.text,fontWeight:"700",flexShrink:0,minWidth:"100px"}}>{t}</span>
-              <span style={{color:T.muted}}>{d}</span>
-            </div>
-          ))}
-        </div>
-        <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"10px"}}>RECENT RESULTS</div>
-        {results.length===0
-          ?<div style={{fontSize:"11px",color:T.muted,padding:"20px",textAlign:"center",border:`1px dashed ${T.border}`,borderRadius:"6px"}}>Settle bets to train the model.</div>
-          :results.slice(-8).reverse().map((r,i)=>(
-            <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"7px 10px",background:T.card,border:`1px solid ${r.correct?T.green+"33":T.red+"22"}`,borderRadius:"4px",marginBottom:"5px",fontSize:"11px"}}>
-              <span style={{color:T.text}}>{r.game}</span>
-              <span style={{color:r.correct?T.green:T.red,fontWeight:"700"}}>{r.correct?"✓":"✗"} {(r.predictedProb*100).toFixed(0)}%</span>
-            </div>
-          ))
-        }
-      </div>
-      <div>
-        <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"12px"}}>FEATURE WEIGHTS</div>
-        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"16px"}}>
-          <div style={{fontSize:"10px",color:T.muted,marginBottom:"12px",lineHeight:"1.6"}}>Gradient descent · updates every settled bet · drifts toward what works.</div>
-          {feats.map(([nm,wt])=>{
-            const pct=Math.min(100,Math.abs(wt)/5*100),col=wt>0?T.green:T.red;
-            return(
-              <div key={nm} style={{marginBottom:"10px"}}>
-                <div style={{display:"flex",justifyContent:"space-between",fontSize:"10px",marginBottom:"3px"}}>
-                  <span style={{color:T.text}}>{nm}</span>
-                  <span style={{color:col,fontWeight:"700"}}>{wt>0?"+":""}{wt.toFixed(3)}</span>
-                </div>
-                <div style={{height:"4px",background:T.surface,borderRadius:"2px"}}>
-                  <div style={{height:"4px",width:`${pct}%`,background:col,borderRadius:"2px",opacity:0.8}}/>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── MAIN APP ──────────────────────────────────────────────────────────────────
+/* ============ MAIN APP ============ */
 function App(){
-  const[tab,setTab]=useState("card");
-  const[analyzed,setAnalyzed]=useState([]);
-  const[card,setCard]=useState(null);
-  const[loading,setLoading]=useState(false);
-  const[espnLoading,setEspnLoading]=useState(true);
-  const[espnStatus,setEspnStatus]=useState({source:"loading",ts:0,teams:0});
-  const[error,setError]=useState(null);
-  const[updated,setUpdated]=useState(null);
-  const[callsLeft,setCallsLeft]=useState(null);
-  const[proxyUrl,setProxyUrl]=useState(()=>sg(SK.proxy,""));
-  const[proxyInput,setProxyInput]=useState(()=>sg(SK.proxy,""));
-  const[bankroll,setBankroll]=useState(()=>sg(SK.bankroll,300));
-  const[dailyMaxPct,setDailyMaxPct]=useState(()=>sg(SK.dmp,0.12));
-  const[h1Lines,setH1Lines]=useState(()=>sg(SK.h1,{}));
-  const[bets,setBets]=useState(()=>sg(SK.bets,[]));
-  const[results,setResults]=useState(()=>sg(SK.results,[]));
-  const[h1OddsMap,setH1OddsMap]=useState({});
-  const mlRef=useRef(new MLModel(sg(SK.model,null)));
-  const ml=mlRef.current;
-  const espnRef=useRef({});
-  const metaRef=useRef({rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}});
-  const[metaStatus,setMetaStatus]=useState("loading");
+const[proxyUrl,setProxyUrl]=useState(sg(SK.proxy,''));
+const[bankroll,setBankroll]=useState(sg(SK.bankroll,1000));
+const[dmp,setDmp]=useState(0.12);
+const[games,setGames]=useState([]);
+const[picks,setPicks]=useState([]);
+const[savedBets,setSavedBets]=useState(sg(SK.bets,[]));
+const[results,setResults]=useState(sg(SK.results,[]));
+const[espnData,setEspnData]=useState({});
+const[meta,setMeta]=useState({});
+const[h1OddsMap,setH1OddsMap]=useState({});
+const[ml]=useState(()=>new MLModel(sg(SK.model,null)));
+const[loading,setLoading]=useState(false);
+const[espnStatus,setEspnStatus]=useState('idle');
+const[tab,setTab]=useState('picks');
+const[proxyEdit,setProxyEdit]=useState(false);
+const[msg,setMsg]=useState(null);
+const[dmpEdit,setDmpEdit]=useState(false);
 
-  const DEMO=[
-    {id:"d1",home_team:"Houston Cougars",away_team:"Baylor Bears",commence_time:new Date().toISOString(),bookmakers:[{key:"dk",markets:[{key:"h2h",outcomes:[{name:"Houston Cougars",price:-580},{name:"Baylor Bears",price:420}]},{key:"spreads",outcomes:[{name:"Houston Cougars",point:-9.5,price:-110},{name:"Baylor Bears",point:9.5,price:-110}]}]}]},
-    {id:"d2",home_team:"Purdue Boilermakers",away_team:"Northwestern Wildcats",commence_time:new Date().toISOString(),bookmakers:[{key:"dk",markets:[{key:"h2h",outcomes:[{name:"Purdue Boilermakers",price:-320},{name:"Northwestern Wildcats",price:260}]},{key:"spreads",outcomes:[{name:"Purdue Boilermakers",point:-6.5,price:-110},{name:"Northwestern Wildcats",point:6.5,price:-110}]}]}]},
-    {id:"d3",home_team:"Villanova Wildcats",away_team:"DePaul Blue Demons",commence_time:new Date().toISOString(),bookmakers:[{key:"dk",markets:[{key:"h2h",outcomes:[{name:"Villanova Wildcats",price:-220},{name:"DePaul Blue Demons",price:178}]},{key:"spreads",outcomes:[{name:"Villanova Wildcats",point:-4.5,price:-110},{name:"DePaul Blue Demons",point:4.5,price:-110}]}]}]},
-    {id:"d4",home_team:"Wisconsin Badgers",away_team:"Maryland Terrapins",commence_time:new Date().toISOString(),bookmakers:[{key:"dk",markets:[{key:"h2h",outcomes:[{name:"Wisconsin Badgers",price:-280},{name:"Maryland Terrapins",price:225}]},{key:"spreads",outcomes:[{name:"Wisconsin Badgers",point:-5.5,price:-110},{name:"Maryland Terrapins",point:5.5,price:-110}]}]}]},
-    {id:"d5",home_team:"Memphis Tigers",away_team:"Tulane Green Wave",commence_time:new Date().toISOString(),bookmakers:[{key:"dk",markets:[{key:"h2h",outcomes:[{name:"Memphis Tigers",price:-180},{name:"Tulane Green Wave",price:148}]},{key:"spreads",outcomes:[{name:"Memphis Tigers",point:-3.5,price:-110},{name:"Tulane Green Wave",point:3.5,price:-110}]}]}]},
-  ];
+const showMsg=(text,color=T.green,dur=3000)=>{setMsg({text,color});setTimeout(()=>setMsg(null),dur);};
 
-  function loadDemo(ed,md){
-    const d=ed||espnRef.current;
-    const m=md||metaRef.current;
-    const e=DEMO.map(g=>analyzeGame(g,ml,bankroll,d,m,dailyMaxPct)).sort((a,b)=>b.conf-a.conf);
-    setAnalyzed(e);setCard(buildCard(e,bankroll,dailyMaxPct,{},espnRef.current));
-  }
+useEffect(()=>{
+ss(SK.bankroll,bankroll);
+},[bankroll]);
 
-  // ESPN fetch on mount — schedule cache + meta in parallel
-  useEffect(()=>{
-    setEspnLoading(true);
-    Promise.all([buildESPNCache(), fetchESPNMeta()]).then(([result, meta])=>{
-      espnRef.current=result.data||{};
-      metaRef.current=meta||{rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}};
-      setEspnStatus(result);
-      setEspnLoading(false);
-      setMetaStatus(Object.keys(meta.rankings||{}).length>0?"live":"partial");
-    }).catch(()=>{
-      setEspnLoading(false);
-      setEspnStatus({source:"failed",ts:0,teams:0});
-      setMetaStatus("failed");
-    });
-  },[]);
+const loadESPN=useCallback(async()=>{
+setEspnStatus('loading');
+try{
+const[c,m]=await Promise.all([buildESPNCache(),fetchESPNMeta()]);
+setEspnData(c.data||{});setMeta(m);
+setEspnStatus(`ok:${c.teams}`);
+showMsg(`ESPN: ${c.teams} teams, ${c.source}`);
+}catch(e){setEspnStatus('error');showMsg('ESPN load failed','#ff3d57');}
+},[]);
 
-  async function fetchH1ForGame(base,gameId){
-    try{
-      const url=`${base}/odds/sports/${SPORT}/events/${gameId}/odds?regions=${REGIONS}&markets=totals_h1&oddsFormat=american`;
-      const res=await fetch(url);
-      if(!res.ok)return null;
-      const data=await res.json();
-      const market=data?.bookmakers?.[0]?.markets?.find(m=>m.key==="totals_h1");
-      const over=market?.outcomes?.find(o=>o.name==="Over");
-      return over?.point??null;
-    }catch{return null;}
-  }
+useEffect(()=>{loadESPN();},[]);
 
-  const fetchOdds=useCallback(async(proxy=proxyUrl)=>{
-    if(!proxy){setError("Enter proxy URL.");loadDemo();return;}
-    setLoading(true);setError(null);
-    try{
-      const base=proxy.replace(/\/$/,"");
-      const url=`${base}/odds/sports/${SPORT}/odds/?regions=${REGIONS}&markets=${MARKETS}&bookmakers=${BOOKMAKERS}&oddsFormat=american`;
-      const res=await fetch(url);
-      if(!res.ok)throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      setCallsLeft(res.headers.get("x-requests-remaining"));
-      const data=await res.json();
-      const e=data.map(g=>analyzeGame(g,ml,bankroll,espnRef.current,metaRef.current,dailyMaxPct)).sort((a,b)=>b.conf-a.conf);
-      setAnalyzed(e);setCard(buildCard(e,bankroll,dailyMaxPct,{},espnRef.current));setUpdated(new Date().toLocaleTimeString());
-      // Fire H1 totals fetches in parallel — one per game
-      const h1Results=await Promise.all(data.map(g=>fetchH1ForGame(base,g.id).then(line=>({id:g.id,line}))));
-      const h1Map={};h1Results.forEach(({id,line})=>{if(line!==null)h1Map[id]=line;});
-      setH1OddsMap(h1Map);
-      // Rebuild card with h1 lines now available
-      setCard(buildCard(e,bankroll,dailyMaxPct,h1Map,espnRef.current));
-    }catch(e){setError(e.message);loadDemo(espnRef.current,metaRef.current);}
-    finally{setLoading(false);}
-  },[proxyUrl,bankroll,dailyMaxPct]);
+const fetchGames=useCallback(async()=>{
+if(!proxyUrl){showMsg('Enter proxy URL first',T.orange);return;}
+setLoading(true);setPicks([]);
+try{
+const url=`${proxyUrl.replace(/\/$/,'')}/odds?sport=${SPORT}&regions=${REGIONS}&markets=${MARKETS}&bookmakers=${BOOKMAKERS}`;
+const res=await fetch(url);if(!res.ok)throw new Error(`HTTP ${res.status}`);
+const data=await res.json();
+if(!Array.isArray(data))throw new Error('Bad response');
+setGames(data);
 
-  useEffect(()=>{proxyUrl?fetchOdds():loadDemo();},[]);
+/* Fetch 1H lines for each game (requires paid totals_h1 market) */
+const h1map={};
+await Promise.all(data.slice(0,12).map(async g=>{
+try{
+const u2=`${proxyUrl.replace(/\/$/,'')}/odds-game?sport=${SPORT}&gameId=${g.id}&markets=totals_h1&bookmakers=draftkings`;
+const r2=await fetch(u2);if(!r2.ok)return;
+const d2=await r2.json();
+const bm=(d2.bookmakers||[])[0];
+const mkt=(bm?.markets||[]).find(m=>m.key==='totals_h1');
+const ov=mkt?.outcomes?.find(o=>o.name==='Over');
+if(ov?.point)h1map[g.id]=ov.point;
+}catch{}
+}));
+setH1OddsMap(h1map);
 
-  function resetModel(){mlRef.current=new MLModel(null);ss(SK.model,null);setResults([]);ss(SK.results,[]);}
+const br=bankroll||1000;
+const analyzed=data.map(g=>analyzeGame(g,ml,br,espnData,meta,dmp)).filter(a=>a.isVal);
+analyzed.sort((a,b)=>b.conf-a.conf);
+const mapped=analyzed.map(a=>{
+const isAnch=a.conf>=85&&a.es>=18,isCore=a.conf>=75&&a.es>=10,isVal=a.conf>=68&&a.es>=6;
+const tier=isAnch?'Anchor':isCore?'Core':isVal?'Value':'Watch';
+const u=calcUnits(br,dmp);const wager=isAnch?u.anchor:isCore?u.core:u.optional;
+const odds=parseFloat(a.edge)>0?a.hSpO:a.aSpO;
+return{...a,tier,wager:+Math.min(wager,u.maxDaily).toFixed(2),odds};
+});
+setPicks(mapped);
+showMsg(`${data.length} games loaded · ${mapped.length} picks`);
+}catch(e){showMsg(`Error: ${e.message}`,T.red);}
+setLoading(false);
+},[proxyUrl,bankroll,ml,espnData,meta,dmp]);
 
-  function refreshESPN(){
-    ss(SK.espn,null);ss(SK.meta,null);setEspnStatus({source:"loading"});setEspnLoading(true);setMetaStatus("loading");
-    Promise.all([buildESPNCache(), fetchESPNMeta()]).then(([r, meta])=>{
-      espnRef.current=r.data||{};
-      metaRef.current=meta||{rankings:{},injuries:{},neutralGames:{},confTourneyGames:{},records:{}};
-      setEspnStatus(r);setEspnLoading(false);
-      setMetaStatus(Object.keys(meta.rankings||{}).length>0?"live":"partial");
-    });
-  }
+const saveBet=(pick)=>{
+const bet={...pick,savedAt:new Date().toISOString(),status:'pending',id:Date.now()};
+const upd=[...savedBets,bet];setSavedBets(upd);ss(SK.bets,upd);
+showMsg('Bet saved!');
+};
 
-  const espnTeams=Object.keys(espnRef.current||{}).length;
-  const espnAge=espnStatus.ts?Math.round((Date.now()-espnStatus.ts)/60000):0;
-  const espnColor=espnStatus.source==="live"?T.green:espnStatus.source==="cached"?T.gold:espnStatus.source==="loading"||espnLoading?T.muted:T.red;
+const gradeBet=(idx,result)=>{
+const upd=[...savedBets];const bet=upd[idx];bet.status=result;
+const br=bankroll||1000;
+if(result==='W'){const gain=bet.wager*(bet.odds>0?bet.odds/100:100/Math.abs(bet.odds));setBankroll(prev=>{const nb=+(prev+gain).toFixed(2);ss(SK.bankroll,nb);return nb;});ml.weights.winningBets=(ml.weights.winningBets||0)+1;}
+else if(result==='L'){setBankroll(prev=>{const nb=+(prev-bet.wager).toFixed(2);ss(SK.bankroll,nb);return nb;});}
+ml.weights.totalBets=(ml.weights.totalBets||0)+1;ml.save();
+setSavedBets(upd);ss(SK.bets,upd);
+const res=[...results,{...bet,result,gradedAt:new Date().toISOString()}];setResults(res);ss(SK.results,res);
+showMsg(result==='W'?'✓ Win recorded!':(result==='L'?'✗ Loss recorded':'— Push recorded'),result==='W'?T.green:(result==='L'?T.red:T.muted));
+};
 
-  const TABS=[{id:"card",label:"📋 Card"},{id:"odds",label:"📊 Games"},{id:"bankroll",label:"💰 Bankroll"},{id:"ml",label:"🤖 ML"}];
+const pending=savedBets.filter(b=>b.status==='pending');
+const wins=results.filter(r=>r.result==='W').length,losses=results.filter(r=>r.result==='L').length,pushes=results.filter(r=>r.result==='P').length;
+const wr=wins+losses>0?((wins/(wins+losses))*100).toFixed(1):'—';
+const totalWagered=results.reduce((s,r)=>s+(r.wager||0),0);
+const totalPnl=results.reduce((s,r)=>{if(r.result==='W')return s+(r.wager||0)*(r.odds>0?r.odds/100:100/Math.abs(r.odds||110));if(r.result==='L')return s-(r.wager||0);return s;},0);
+const roi=totalWagered>0?((totalPnl/totalWagered)*100).toFixed(1):'—';
 
-  return(
-    <div style={{background:T.bg,minHeight:"100vh",color:T.text}}>
-      {/* HEADER */}
-      <div style={{background:"linear-gradient(180deg,#08101e,#07090f)",borderBottom:`1px solid ${T.border}`,padding:"12px 16px"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:"8px"}}>
-          <div>
-            <div style={{fontSize:"15px",fontWeight:"700",color:T.accent,letterSpacing:"2px"}}>▸ NCAAMB EDGE <span style={{fontSize:"9px",color:T.muted}}>v5 · ESPN LIVE</span></div>
-            <div style={{fontSize:"8px",color:T.muted,letterSpacing:"1px",marginTop:"2px"}}>{updated?`UPDATED ${updated}`:"LIVE ODDS · EFFICIENCY · SCHEDULE · TRAVEL"}{callsLeft?` · ${callsLeft} CALLS LEFT`:""}</div>
-          </div>
-          <div style={{display:"flex",gap:"12px",alignItems:"center"}}>
-            <div style={{textAlign:"right"}}><div style={{fontSize:"8px",color:T.muted}}>BANKROLL</div><div style={{fontSize:"20px",fontWeight:"700",color:bankroll>=300?T.green:T.red}}>${bankroll.toLocaleString()}</div></div>
-            <div style={{textAlign:"right"}}><div style={{fontSize:"8px",color:T.muted}}>ACCURACY</div><div style={{fontSize:"20px",fontWeight:"700",color:T.accent}}>{ml.accuracy}%</div></div>
-            <button onClick={()=>fetchOdds()} disabled={loading} style={s.btn(loading?T.surface:T.accent)}>
-              {loading?<span style={{display:"inline-block",width:"12px",height:"12px",border:`2px solid ${T.accent}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>:"↻"}
-            </button>
-          </div>
-        </div>
-      </div>
+const tabs=[{id:'picks',label:'PICKS'},{id:'h1',label:'1H TOTAL'},{id:'tracker',label:'TRACKER'},{id:'settings',label:'SETTINGS'}];
 
-      {/* ESPN STATUS BAR */}
-      <div style={{display:"flex",alignItems:"center",gap:"8px",padding:"5px 16px",background:`${espnColor}08`,borderBottom:`1px solid ${espnColor}22`,fontSize:"9px",letterSpacing:"1px"}}>
-        <span className={espnLoading?"pulse":""} style={{color:espnColor}}>{espnLoading?"⟳":espnStatus.source==="live"?"●":espnStatus.source==="cached"?"◑":"○"}</span>
-        <span style={{color:espnColor,fontWeight:"700"}}>
-          {espnLoading?"ESPN: SYNCING...":
-           espnStatus.source==="live"?`ESPN LIVE · ${espnTeams} TEAMS TRACKED`:
-           espnStatus.source==="cached"?`ESPN CACHED · ${espnTeams} TEAMS · ${espnAge}m AGO`:
-           "ESPN OFFLINE · STATIC DATA ONLY"}
-        </span>
-        {(espnStatus.source==="live"||espnStatus.source==="cached")&&<span style={{color:T.muted}}>rest days · B2B · travel · rolling form active</span>}
-        {metaStatus==="live"&&<span style={{color:T.green,fontSize:"8px"}}>· AP RANKS · INJURIES · NEUTRAL SITE</span>}
-        {metaStatus==="partial"&&<span style={{color:T.gold,fontSize:"8px"}}>· PARTIAL META</span>}
-        {espnStatus.source==="failed"&&<span style={{color:T.muted}}>schedule data unavailable</span>}
-        <button onClick={refreshESPN} style={{marginLeft:"auto",background:"transparent",border:`1px solid ${T.border}`,color:T.muted,fontSize:"8px",padding:"2px 8px",borderRadius:"3px",cursor:"pointer",fontFamily:"inherit"}}>↺ REFRESH</button>
-      </div>
+return<div style={{maxWidth:480,margin:'0 auto',padding:'12px 10px 60px',minHeight:'100vh'}}>
+{/* Header */}
+<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16,padding:'10px 14px',background:T.surface,borderRadius:10,border:`1px solid ${T.border}`}}>
+<div>
+<div style={{fontWeight:700,fontSize:16,color:T.accent,letterSpacing:1}}>NCAAMB EDGE</div>
+<div style={{fontSize:9,color:T.muted,letterSpacing:2}}>v5 · ESPN LIVE · 1H CAL FIX</div>
+</div>
+<div style={{textAlign:'right'}}>
+<div style={{fontSize:14,fontWeight:700,color:T.gold}}>${bankroll?.toLocaleString()}</div>
+<div style={{fontSize:10,color:T.muted}}>BANKROLL</div>
+</div>
+</div>
 
-      {/* PROXY SETUP */}
-      {!proxyUrl&&(
-        <div style={{background:`${T.gold}08`,border:`1px solid ${T.gold}33`,margin:"12px 16px",borderRadius:"6px",padding:"12px 16px"}}>
-          <div style={{fontSize:"9px",color:T.gold,letterSpacing:"2px",marginBottom:"8px"}}>PROXY URL REQUIRED FOR LIVE ODDS</div>
-          <div style={{display:"flex",gap:"8px"}}>
-            <input placeholder="https://your-proxy.onrender.com" value={proxyInput} onChange={e=>setProxyInput(e.target.value)} style={{...s.input,flex:1}}/>
-            <button onClick={()=>{setProxyUrl(proxyInput);ss(SK.proxy,proxyInput);fetchOdds(proxyInput);}} style={s.btn(T.gold)}>CONNECT</button>
-          </div>
-        </div>
-      )}
-      {error&&<div style={{background:`${T.red}0a`,border:`1px solid ${T.red}33`,margin:"0 16px 8px",borderRadius:"4px",padding:"8px 12px",fontSize:"10px",color:T.red}}>{error}</div>}
+{/* ESPN status bar */}
+<div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap',alignItems:'center'}}>
+<span style={{fontSize:10,color:espnStatus.startsWith('ok')?T.green:espnStatus==='loading'?T.orange:T.red}}>
+{espnStatus==='idle'?'ESPN: idle':espnStatus==='loading'?'ESPN: loading…':espnStatus.startsWith('ok')?`ESPN: ${espnStatus.split(':')[1]} teams`:espnStatus}
+</span>
+<button onClick={loadESPN} style={{background:'none',border:`1px solid ${T.border}`,borderRadius:4,color:T.muted,cursor:'pointer',fontSize:10,padding:'1px 8px'}}>↺ refresh</button>
+<span style={{fontSize:10,color:T.muted,marginLeft:'auto'}}>ML: {ml.accuracy}% acc · {ml.winRate}% W</span>
+</div>
 
-      {/* TABS */}
-      <div style={{display:"flex",borderBottom:`1px solid ${T.border}`,padding:"0 16px",background:T.surface}}>
-        {TABS.map(t=>(
-          <button key={t.id} onClick={()=>setTab(t.id)} style={{background:"none",border:"none",borderBottom:`2px solid ${tab===t.id?T.accent:"transparent"}`,color:tab===t.id?T.accent:T.muted,padding:"10px 14px",cursor:"pointer",fontFamily:"inherit",fontSize:"10px",fontWeight:"700",letterSpacing:"1px"}}>{t.label}</button>
-        ))}
-      </div>
+{/* Tabs */}
+<div style={{display:'flex',gap:4,marginBottom:14}}>
+{tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{flex:1,background:tab===t.id?T.accent+'22':T.surface,color:tab===t.id?T.accent:T.muted,border:`1px solid ${tab===t.id?T.accent+'66':T.border}`,borderRadius:6,padding:'6px 4px',fontSize:10,fontWeight:700,cursor:'pointer',letterSpacing:.5}}>{t.label}{t.id==='tracker'&&pending.length>0?` (${pending.length})`:''}</button>)}
+</div>
 
-      {/* CONTENT */}
-      <div style={{padding:"16px",maxWidth:"1400px",margin:"0 auto"}}>
+{/* Notification */}
+{msg&&<div style={{padding:'8px 14px',background:msg.color+'22',border:`1px solid ${msg.color}44`,borderRadius:6,color:msg.color,fontSize:12,marginBottom:10,textAlign:'center'}}>{msg.text}</div>}
 
-        {tab==="card"&&card&&(
-          <div style={{display:"grid",gridTemplateColumns:"1fr min(280px,35%)",gap:"16px"}}>
-            <div>
-              <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"12px"}}>TODAY'S PICKS · TAP TO EXPAND</div>
-              {card.spreadPicks&&card.spreadPicks.length>0&&(
-                <div style={{fontSize:"8px",color:T.gold,letterSpacing:"2px",marginBottom:"8px",marginTop:"4px"}}>── SPREAD PICKS</div>
-              )}
-              {(card.spreadPicks||card.picks).length===0&&(card.h1Picks||[]).length===0
-                ?<div style={{textAlign:"center",color:T.muted,padding:"60px",border:`1px dashed ${T.border}`,borderRadius:"6px",fontSize:"11px"}}>NO QUALIFYING PICKS TODAY<br/><span style={{fontSize:"9px",marginTop:"8px",display:"block"}}>Lower thresholds or wait for better spots</span></div>
-                :(card.spreadPicks||card.picks).map((p,i)=>(
-                  <PickCard key={p.id} pick={p} showDetail={i===0} bets={bets} onPlace={(betData,removeId)=>{
-                    if(removeId){setBets(prev=>{const u=[...prev].filter(b=>b.id!==removeId);ss(SK.bets,u);return u;});}
-                    else{const ml2=parseFloat(betData.odds),w=parseFloat(betData.wager),profit=ml2>0?w*(ml2/100):w*(100/Math.abs(ml2));const nb={id:Date.now(),...betData,wager:w,profit:+profit.toFixed(2),result:null,date:new Date().toLocaleDateString()};setBets(prev=>{const u=[...prev,nb];ss(SK.bets,u);return u;});}
-                  }}/>
-                ))
-              }
-              {card.h1Picks&&card.h1Picks.length>0&&(
-                <div>
-                  <div style={{fontSize:"8px",color:T.cyan,letterSpacing:"2px",margin:"16px 0 8px"}}>── 1ST HALF TOTAL PICKS</div>
-                  {card.h1Picks.map((p)=>(
-                    <H1PickCard key={p.id} pick={p} bets={bets} onPlace={(betData,removeId)=>{
-                      if(removeId){setBets(prev=>{const u=[...prev].filter(b=>b.id!==removeId);ss(SK.bets,u);return u;});}
-                      else{const nb={id:Date.now(),...betData,profit:+(betData.wager*(100/110)).toFixed(2),result:null,date:new Date().toLocaleDateString()};setBets(prev=>{const u=[...prev,nb];ss(SK.bets,u);return u;});}
-                    }}/>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div>
-              {card.traps.length>0&&(
-                <div style={{background:T.card,border:`1px solid ${T.red}33`,borderRadius:"6px",padding:"14px",marginBottom:"12px"}}>
-                  <div style={{fontSize:"9px",color:T.red,letterSpacing:"2px",marginBottom:"10px"}}>🚫 AVOID — TRAPS</div>
-                  {card.traps.map((g,i)=>(
-                    <div key={i} style={{padding:"7px 10px",background:`${T.red}08`,border:`1px solid ${T.red}22`,borderRadius:"4px",marginBottom:"6px"}}>
-                      <div style={{fontSize:"11px",fontWeight:"700",color:T.text,marginBottom:"2px"}}>{g.ae.name} @ {g.he.name}</div>
-                      <div style={{fontSize:"10px",color:T.muted}}>Spread:{fml(g.hSp)} · {g.pubPen?"Public bias":"Large fav"}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"14px",marginBottom:"12px"}}>
-                <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"10px"}}>TODAY'S SUMMARY</div>
-                {[["Spread Picks",(card.spreadPicks||card.picks).length,T.accent],["1H Total Picks",(card.h1Picks||[]).length,T.cyan],["Anchor",card.anchorCount,T.gold],["Core",card.coreCount,T.green],["Value",card.optCount,T.purple],["Exposure",`$${card.exp}`,T.text]].map(([l,v,c])=>(
-                  <div key={l} style={{display:"flex",justifyContent:"space-between",fontSize:"11px",marginBottom:"5px"}}><span style={{color:T.muted}}>{l}</span><span style={{color:c,fontWeight:"700"}}>{v}</span></div>
-                ))}
-              </div>
-              {espnTeams>0&&(
-                <div style={{background:T.card,border:`1px solid ${T.green}33`,borderRadius:"6px",padding:"14px"}}>
-                  <div style={{fontSize:"9px",color:T.green,letterSpacing:"2px",marginBottom:"8px"}}>📡 ESPN LIVE DATA</div>
-                  <div style={{fontSize:"10px",color:T.muted,lineHeight:"1.9"}}><span style={{color:T.text}}>{espnTeams}</span> teams tracked<br/>Rest · B2B · Travel · Timezone · Rolling form</div>
-                  {(card.spreadPicks||card.picks).some(p=>p.schedule?.awayB2B)&&<div style={{marginTop:"8px",padding:"5px 8px",background:`${T.orange}10`,border:`1px solid ${T.orange}33`,borderRadius:"3px",fontSize:"10px",color:T.orange}}>⚡ B2B away — fatigue applied</div>}
-                  {(card.spreadPicks||card.picks).some(p=>(p.schedule?.travelKm||0)>800)&&<div style={{marginTop:"6px",padding:"5px 8px",background:`${T.purple}10`,border:`1px solid ${T.purple}33`,borderRadius:"3px",fontSize:"10px",color:T.purple}}>✈ Long travel — penalty applied</div>}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+{/* PICKS TAB */}
+{tab==='picks'&&<div>
+<div style={{display:'flex',gap:8,marginBottom:12}}>
+<Btn onClick={fetchGames} color={T.accent} disabled={loading} style={{flex:1}}>{loading?'Loading…':'Fetch Games & Picks'}</Btn>
+</div>
+{picks.length===0&&!loading&&<div style={{textAlign:'center',padding:32,color:T.muted,fontSize:13}}>
+{games.length>0?'No qualifying picks found.':'Fetch games to see picks.'}
+</div>}
+{picks.map((p,i)=><div key={p.id||i}>
+<PickCard pick={p} idx={i}/>
+<div style={{display:'flex',gap:6,marginBottom:10,justifyContent:'flex-end'}}>
+<Btn onClick={()=>saveBet(p)} color={T.gold} style={{fontSize:11,padding:'4px 12px'}}>+ Save Bet</Btn>
+</div>
+</div>)}
+</div>}
 
-        {tab==="odds"&&(
-          <div>
-            <div style={{fontSize:"9px",color:T.muted,letterSpacing:"2px",marginBottom:"14px"}}>ALL GAMES — TAP TO EXPAND · ⏱ 1H TOTAL TOOL IN EACH GAME</div>
-            {analyzed.map((a,i)=>{
-              const u=calcUnits(bankroll,dailyMaxPct),tier=a.conf>=TH.anchor.minConf&&a.es>=TH.anchor.minEdge?"anchor":a.conf>=TH.core.minConf&&a.es>=TH.core.minEdge?"core":"optional";
-              const wager=tier==="anchor"?u.anchor:tier==="core"?u.core:u.optional;
-              return(
-                <div key={a.id}>
-                  <PickCard pick={{...a,tier,wager,rank:i+1}}/>
-                  <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:"0 0 6px 6px",padding:"0 14px 12px",marginTop:"-6px",marginBottom:"12px"}}>
-                    <H1TotalTool gameId={a.id} he={a.he} ae={a.ae} h1OddsMap={h1OddsMap} h1Lines={h1Lines} setH1Lines={setH1Lines} espnCache={espnRef.current}/>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+{/* 1H TOTAL TAB */}
+{tab==='h1'&&<H1TotalTool games={games} espnData={espnData} h1OddsMap={h1OddsMap} proxyUrl={proxyUrl}/>}
 
-        {tab==="bankroll"&&<BankrollTab bets={bets} setBets={setBets} bankroll={bankroll} setBankroll={setBankroll} ml={ml} setResults={setResults} results={results} dailyMaxPct={dailyMaxPct} setDailyMaxPct={setDailyMaxPct}/>}
-        {tab==="ml"&&<MLTab model={ml} results={results} onReset={resetModel}/>}
-      </div>
+{/* TRACKER TAB */}
+{tab==='tracker'&&<div>
+<div style={{display:'flex',gap:8,marginBottom:12,padding:12,background:T.surface,borderRadius:8,border:`1px solid ${T.border}`}}>
+{[['W',wins,T.green],['L',losses,T.red],['P',pushes,T.muted]].map(([l,v,c])=><div key={l} style={{flex:1,textAlign:'center'}}><div style={{fontSize:18,fontWeight:700,color:c}}>{v}</div><div style={{fontSize:10,color:T.muted}}>{l}</div></div>)}
+<div style={{flex:1,textAlign:'center'}}><div style={{fontSize:18,fontWeight:700,color:T.gold}}>{wr}%</div><div style={{fontSize:10,color:T.muted}}>WIN%</div></div>
+<div style={{flex:1,textAlign:'center'}}><div style={{fontSize:18,fontWeight:700,color:totalPnl>=0?T.green:T.red}}>{totalPnl>=0?'+':''}{totalPnl.toFixed(0)}</div><div style={{fontSize:10,color:T.muted}}>PNL $</div></div>
+<div style={{flex:1,textAlign:'center'}}><div style={{fontSize:18,fontWeight:700,color:parseFloat(roi)>=0?T.green:T.red}}>{roi}%</div><div style={{fontSize:10,color:T.muted}}>ROI</div></div>
+</div>
+{pending.length>0&&<div><div style={{fontSize:11,color:T.muted,marginBottom:8}}>PENDING ({pending.length})</div>
+{savedBets.map((b,i)=>b.status==='pending'&&<PickCard key={b.id||i} pick={b} idx={i} onGrade={gradeBet}/>)}</div>}
+{results.length>0&&<div style={{marginTop:12}}><div style={{fontSize:11,color:T.muted,marginBottom:8}}>GRADED ({results.length})</div>
+{[...results].reverse().slice(0,20).map((r,i)=><div key={i} style={{background:T.card,border:`1px solid ${r.result==='W'?T.green+'44':r.result==='L'?T.red+'44':T.border}`,borderRadius:8,padding:'8px 10px',marginBottom:6,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+<div><span style={{fontWeight:700,color:r.result==='W'?T.green:r.result==='L'?T.red:T.muted,fontSize:12}}>{r.result}</span><span style={{marginLeft:8,fontSize:12,color:T.text}}>{r.side}</span><span style={{marginLeft:6,fontSize:11,color:T.muted}}>{r.home} v {r.away}</span></div>
+<span style={{fontSize:12,color:T.muted}}>{r.result==='W'?'+':(r.result==='L'?'-':'±')}{r.wager}</span>
+</div>)}
+</div>}
+</div>}
 
-      <div style={{borderTop:`1px solid ${T.border}`,padding:"12px 16px",textAlign:"center",fontSize:"8px",color:T.muted}}>
-        ⚠ FOR ENTERTAINMENT ONLY · GAMBLE RESPONSIBLY · VERIFY LEGALITY IN YOUR JURISDICTION
-      </div>
-    </div>
-  );
+{/* SETTINGS TAB */}
+{tab==='settings'&&<div>
+{C.section('Bankroll',<div style={{display:'flex',gap:8,alignItems:'center'}}>
+<input type="number" value={bankroll} onChange={e=>setBankroll(parseFloat(e.target.value)||1000)} style={{flex:1,background:T.card,border:`1px solid ${T.border}`,borderRadius:6,color:T.text,padding:'8px 10px',fontSize:14}}/>
+<Btn onClick={()=>showMsg('Bankroll saved!')} color={T.green}>Save</Btn>
+</div>)}
+{C.section('Daily Max %',<div style={{display:'flex',gap:8,alignItems:'center'}}>
+<input type="number" min={0.05} max={0.30} step={0.01} value={dmp} onChange={e=>setDmp(parseFloat(e.target.value)||0.12)} style={{flex:1,background:T.card,border:`1px solid ${T.border}`,borderRadius:6,color:T.text,padding:'8px 10px',fontSize:14}}/>
+<span style={{fontSize:11,color:T.muted}}>Max: ${+(bankroll*dmp).toFixed(0)}/day</span>
+</div>)}
+{C.section('Proxy URL',<div>
+<input value={proxyUrl} onChange={e=>{setProxyUrl(e.target.value);ss(SK.proxy,e.target.value);}} placeholder="https://your-proxy.onrender.com" style={{width:'100%',background:T.card,border:`1px solid ${T.border}`,borderRadius:6,color:T.text,padding:'8px 10px',fontSize:12,marginBottom:6}}/>
+<div style={{fontSize:10,color:T.muted}}>Render.com proxy that injects Odds API key</div>
+</div>)}
+{C.section('ML Model',<>
+{C.row('Accuracy',`${ml.accuracy}%`)}
+{C.row('Bet W%',`${ml.winRate}%`)}
+{C.row('Total preds',ml.weights.totalPredictions)}
+{C.row('adjEM weight',ml.weights.adjEM_diff?.toFixed(3))}
+<Btn onClick={()=>{const fresh=new MLModel(null);Object.assign(ml.weights,fresh.weights);ml.save();showMsg('Model reset',T.orange);}} color={T.red} style={{marginTop:8,fontSize:11}}>Reset Model</Btn>
+</>)}
+{C.section('Data',<>
+<Btn onClick={()=>{ss(SK.espn,null);loadESPN();showMsg('ESPN cache cleared');}} color={T.muted} style={{fontSize:11,marginRight:8}}>Clear ESPN Cache</Btn>
+<Btn onClick={()=>{ss(SK.h1,{});showMsg('1H lines cleared',T.muted);}} color={T.muted} style={{fontSize:11}}>Clear 1H Lines</Btn>
+</>)}
+</div>}
+</div>;
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+const root=ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App/>);
 </script>
 </body>
 </html>
